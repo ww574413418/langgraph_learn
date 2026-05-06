@@ -3,10 +3,17 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 .venv/
 venv/
 env/
 evn/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -21,4 +28,5 @@ evn/
 # Secrets / local config
 .env
 *.log
+logs/
 evn

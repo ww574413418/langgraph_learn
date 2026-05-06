@@ -4,7 +4,7 @@ from langchain.agents import create_agent
 from langchain_openai.chat_models import ChatOpenAI
 from langchain_community.tools.tavily_search import TavilySearchResults
 
-tools = [TavilySearchResults(api_key=api_tavily,max_results=1)]
+tools = [TavilySearchResults(tavily_api_key=api_tavily,max_results=1)]
 
 # Get the prompt to use - you can modify this!
 prompt = hub.pull ("hwchase17/openai-functions-agent")
