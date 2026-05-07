@@ -36,3 +36,11 @@ class KnowledgeBaseRead(BaseModel):
     extra_metadata:dict
     created_at:datetime
     updated_at:datetime
+
+class KnowledgeBaseUpdate(BaseModel):
+    '''
+    更新知识库所需字段
+    '''
+    name:str |None = Field(default=None,min_length=1,max_length=100)
+    description:str|None = None
+    domain:str|None = None
