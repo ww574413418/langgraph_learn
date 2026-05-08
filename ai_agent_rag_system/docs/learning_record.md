@@ -671,6 +671,113 @@
 - 创建 `KnowledgeBaseService`。
 - 实现 `POST /api/knowledge-bases` 和 `GET /api/knowledge-bases`。
 
+### 日期：2026-05-07
+
+学习主题：
+
+- 知识库 CRUD、部分更新、软删除和接口测试。
+
+今天完成：
+
+- 实现 `KnowledgeBaseCreate`、`KnowledgeBaseRead`、`KnowledgeBaseUpdate`。
+- 实现知识库创建、列表、详情、部分更新、软删除接口。
+- 理解 `POST` 和 `PATCH` 使用不同 schema 的原因。
+- 使用 `exclude_unset=True` 实现部分更新，避免未传字段被覆盖。
+- 理解知识库系统为什么优先使用软删除。
+- 补充知识库接口测试，覆盖创建、列表、详情、更新、删除、404 和非法 UUID。
+- 新增第一份学习笔记 `study_notes.md`，整理 FastAPI 工程骨架和知识库 CRUD。
+
+今天写了哪些代码或文档：
+
+- `app/schemas/knowledge_base.py`
+- `app/services/knowledge_base_service.py`
+- `app/api/routes/knowledge_bases.py`
+- `tests/test_knowledge_bases.py`
+- `docs/study_notes.md`
+
+今天理解的关键概念：
+
+- API 层负责 HTTP 语义，service 层负责业务逻辑。
+- 422 表示请求参数格式或请求体校验失败。
+- 404 表示请求格式正确，但业务资源不存在。
+- `KnowledgeBaseUpdate` 的字段应该都是可选。
+- 软删除本质是把 `status` 改为 `disabled`，保留可追溯数据。
+- 测试中如果后续依赖创建结果，应先断言创建请求成功。
+
+遇到的问题：
+
+- PATCH 接口误用了 `KnowledgeBaseCreate`，导致只更新 `description` 时仍要求 `name`。
+- 测试路径写成 `api/knowledge-base`，导致创建失败后读取 `created["id"]` 报错。
+
+解决方式：
+
+- 将 PATCH 请求体类型改为 `KnowledgeBaseUpdate`。
+- 统一使用正确路径 `/api/knowledge-bases`。
+- 在测试中先断言 `create_response.status_code == 201`。
+
+下次继续：
+
+- 进入文档入库基础，设计 `documents` 表。
+
+### 日期：2026-05-08
+
+学习主题：
+
+- `documents` 表、Alembic 迁移处理、Document API 和本地资料入库脚本准备。
+
+今天完成：
+
+- 设计 `Document` 模型，用于登记知识库下的文档元数据。
+- 理解 `documents` 表不直接保存完整文件内容的原因。
+- 理解文档处理状态 `uploaded`、`parsing`、`parsed`、`chunking`、`indexed`、`failed` 的作用。
+- 生成并执行 `documents` 表迁移。
+- 发现并删除重复生成的空迁移。
+- 为 `file_hash` 补充索引迁移。
+- 验证 `documents` 表、外键、`status` 索引、`knowledge_base_id` 索引、`file_hash` 索引。
+- 实现 `DocumentCreate`、`DocumentRead`。
+- 实现 Document 创建、列表、按知识库过滤、详情接口。
+- 通过 curl 验证 Document 接口可用。
+- 创建第二份学习笔记 `study_notes2.md`，用于后续文档入库和 RAG 数据基础记录。
+
+今天写了哪些代码或文档：
+
+- `app/models/document.py`
+- `app/db/base.py`
+- `app/schemas/document.py`
+- `app/services/document_service.py`
+- `app/api/routes/documents.py`
+- `app/api/router.py`
+- `migrations/versions/32bfadf5771c_create_documents.py`
+- `migrations/versions/42abb46cdedc_add_document_file_hash_index.py`
+- `docs/study_notes2.md`
+
+今天理解的关键概念：
+
+- `documents` 表保存文件元数据，不保存完整原始文件内容。
+- `file_path` 指向文件位置，`file_hash` 用于判断文件内容是否重复或变化。
+- 新增模型后必须在 `app/db/base.py` 导入，否则 Alembic 可能看不到模型。
+- 已执行过的迁移不要随便修改，缺少的变更应通过新迁移补齐。
+- 空迁移如果还没有执行，可以删除后重新生成正确迁移。
+- `response_model` 字段必须和 ORM 模型属性对齐，否则数据库写入成功后仍可能响应序列化失败。
+
+遇到的问题：
+
+- Alembic 生成了重复的空迁移。
+- `file_hash` 初始迁移中缺少索引。
+- `DocumentRead` 中 `extra_metadata` 拼写错误，导致 `POST /api/documents` 返回 500。
+- `list_documents` 初始实现中没有正确处理 `knowledge_base_id is None`，也没有加 where 过滤。
+
+解决方式：
+
+- 删除未执行的空迁移。
+- 新增 `add document file hash index` 迁移。
+- 将 `extra_metadate` 修正为 `extra_metadata`。
+- 在 `list_documents` 中先定义基础 `select(Document)`，再根据可选查询参数追加 `.where(...)`。
+
+下次继续：
+
+- 学习本地资料入库脚本，扫描 `data/` 目录并自动登记文档。
+
 ## 7. 里程碑记录
 
 ### Milestone 0：项目规划
@@ -733,7 +840,7 @@
 
 ### Milestone 2：会话和知识库基础
 
-状态：进行中
+状态：知识库基础已完成，会话和消息待开始
 
 目标：
 
@@ -745,17 +852,18 @@
 
 - 创建 `knowledge_bases` 表。
 - 建立 Alembic 迁移链路。
+- 实现知识库 schema。
+- 实现知识库 service。
+- 实现知识库创建、列表、详情、部分更新和软删除接口。
+- 补充知识库接口测试。
 
 待完成：
 
-- 实现知识库 schema。
-- 实现知识库 service。
-- 实现知识库创建和列表接口。
 - 实现会话和消息模型。
 
 ### Milestone 3：RAG 入库
 
-状态：未开始
+状态：已开始
 
 目标：
 
@@ -764,6 +872,22 @@
 - 父子 chunk。
 - Word 图片抽取。
 - 图片 URL 替换。
+- embedding 和 pgvector 入库。
+
+已完成：
+
+- 创建 `documents` 表。
+- 建立 `documents` 与 `knowledge_bases` 的外键关系。
+- 为 `knowledge_base_id`、`status`、`file_hash` 建立索引。
+- 实现文档登记、列表、按知识库过滤和详情接口。
+
+待完成：
+
+- 本地资料入库脚本。
+- 文档内容解析。
+- 普通 chunk 和父子 chunk 表设计。
+- chunk 切分与入库。
+- 图片资产抽取与登记。
 - embedding 和 pgvector 入库。
 
 ### Milestone 4：RAG 问答

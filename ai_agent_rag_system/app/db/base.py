@@ -6,3 +6,4 @@ Alembic 是数据库迁移工具。模型变了，数据库表结构怎么同步
 '''
 from app.db.base_class import Base
 from app.models.knowledge_base import KnowledgeBase  # noqa: F401
+from app.models.document import Document

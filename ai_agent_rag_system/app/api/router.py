@@ -3,7 +3,7 @@
 '''
 
 from fastapi import APIRouter
-from app.api.routes import health,knowledge_bases
+from app.api.routes import health,knowledge_bases,documents
 
 api_router = APIRouter()
 
@@ -17,4 +17,9 @@ api_router.include_router(
     knowledge_bases.router,
     prefix="/knowledge-bases",
     tags=["knowledge-bases"]
+)
+api_router.include_router(
+    documents.router,
+    prefix="/documents",
+    tags=["documents"]
 )
