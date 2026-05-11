@@ -778,6 +778,118 @@
 
 - 学习本地资料入库脚本，扫描 `data/` 目录并自动登记文档。
 
+### 日期：2026-05-09
+
+学习主题：
+
+- 本地资料入库脚本。
+
+今天完成：
+
+- 创建 `scripts/register_local_documents.py`。
+- 实现文件类型识别函数 `detect_file_type`。
+- 实现文件内容 hash 计算函数 `calculate_file_hash`。
+- 实现 `data/` 目录递归扫描函数 `iter_files`。
+- 实现通过 `file_hash` 判断文档是否已登记的函数 `document_exists`。
+- 实现本地文档登记函数 `register_documents`。
+- 将临时 `python -c` 调用升级为正式 CLI 参数调用。
+- 使用 `--knowledge-base-id` 和 `--data-dir` 运行脚本。
+- 验证脚本第一次运行可登记 6 个资料文件。
+- 验证脚本第二次运行可以识别重复文件并跳过，具备幂等性。
+
+今天写了哪些代码：
+
+- `scripts/register_local_documents.py`
+
+今天理解的关键概念：
+
+- `scripts/` 适合放本地批处理、数据初始化和维护脚本。
+- `app/api/routes/` 适合放对外 HTTP 请求入口。
+- `file_hash` 是基于文件内容计算的指纹，比文件名更适合判断重复。
+- 同名文件内容可能不同，不同名文件内容也可能相同。
+- 幂等性表示同一个脚本重复执行，不会重复产生错误数据。
+- `python -c` 适合临时验证，正式脚本应使用命令行参数。
+
+遇到的问题：
+
+- 脚本输出中只打印 hash，没有打印文件名，不利于排查。
+
+解决方式：
+
+- 后续建议将输出调整为同时包含文件路径和 hash，例如 `SKIP existing: {file_path} {file_hash}`。
+
+下次继续：
+
+- 学习文档解析入口：根据 `documents.file_path` 读取文件内容，为后续 chunk 切分做准备。
+
+### 日期：2026-05-11
+
+学习主题：
+
+- 文档解析入口、Markdown 图片资产解析、`document_assets` 表和解析脚本。
+
+今天完成：
+
+- 创建 `app/rag/loaders.py`。
+- 定义统一解析结果 `ParsedDocument`。
+- 定义图片资产结构 `ParsedAsset`。
+- 实现 txt 文本文件读取。
+- 实现 Markdown 图片语法解析，将 `![](...)` 替换为 `[IMAGE:asset_xxx]` 占位符。
+- 验证 `data/md/数组.md` 可以识别 6 张图片。
+- 设计并创建 `document_assets` 表。
+- 建立 `document_assets.document_id -> documents.id` 外键。
+- 为 `document_id`、`asset_type`、`placeholder` 创建索引。
+- 实现 `DocumentAssetCreate`、`DocumentAssetRead`。
+- 实现 `DocumentAsset` service，包括创建、按文档列出、按 placeholder 查询。
+- 实现 `save_parsed_assets`，把 Markdown 图片复制到 `app/static/assets/{document_id}/` 并写入 `document_assets`。
+- 增加重复解析保护：同一文档下相同 placeholder 的 asset 不重复写入。
+- 解析成功后将 `documents.status` 更新为 `parsed`。
+- 解析失败时将 `documents.status` 更新为 `failed` 并记录 `error_message`。
+- 创建正式解析脚本 `scripts/parse_registered_documents.py`。
+- 验证解析脚本可以处理 `uploaded` 文档，并跳过暂未支持的 PDF 类型。
+
+今天写了哪些代码：
+
+- `app/rag/loaders.py`
+- `app/models/document_asset.py`
+- `app/schemas/document_asset.py`
+- `app/services/document_asset_service.py`
+- `app/services/document_parse_service.py`
+- `scripts/parse_registered_documents.py`
+- `migrations/versions/e349934e4513_create_document_assets.py`
+
+今天理解的关键概念：
+
+- 图片不应该直接塞进正文文本，而应该用 placeholder 保留位置，并把图片信息单独保存为 asset。
+- Markdown 图片和 docx 图片来源不同，但后续都应该归一成 `ParsedAsset`。
+- `storage_path` 给后端文件系统使用，`url` 给前端展示使用。
+- `placeholder` 是稳定逻辑标识，URL 是可变化的展示地址。
+- `document_assets` 独立成表，比塞进 `documents.metadata` 更适合查询、关联、维护和召回。
+- 解析脚本应按 `status` 选择待处理文档。
+- 暂未支持的文件类型不应该轻易标为 `failed`，可以先跳过等待后续 loader。
+
+遇到的问题：
+
+- 在 dataclass 中误用了 Pydantic 的 `Field`，导致初始化错误。
+- Markdown loader 一开始没有生效，因为 `load_document` 先命中了通用 `SUPPORTED_FILE_TYPES` 分支。
+- `alt_text` 初始迁移生成了 `nullable=False`，但 Markdown 图片 alt 文本可以为空。
+- 直接 `python -c` 操作 ORM 时只导入了 `Document`，导致 SQLAlchemy metadata 中缺少 `knowledge_bases`，提交时出现外键解析错误。
+- 解析脚本最初错误导入 `from models.document import Document`，导致 `ModuleNotFoundError`。
+- PDF 暂未实现 loader，被解析脚本标记成 `failed`。
+
+解决方式：
+
+- dataclass 默认列表使用 `dataclasses.field(default_factory=list)`。
+- `load_document` 按具体文件类型分支，`md` 单独走 `load_markdown_file`。
+- 将 `alt_text` 改为 nullable。
+- 在脚本入口导入 `from app.db import base`，触发所有模型注册。
+- 所有项目内导入使用完整包路径 `app...`。
+- 解析脚本查询条件先限制为当前支持的 `txt`、`text`、`md`，PDF 保持待处理状态。
+
+下次继续：
+
+- 设计 `document_chunks` 表，开始进入 RAG chunk 入库。
+
 ## 7. 里程碑记录
 
 ### Milestone 0：项目规划
@@ -880,14 +992,21 @@
 - 建立 `documents` 与 `knowledge_bases` 的外键关系。
 - 为 `knowledge_base_id`、`status`、`file_hash` 建立索引。
 - 实现文档登记、列表、按知识库过滤和详情接口。
+- 实现本地资料入库脚本。
+- 支持扫描 `data/` 目录并登记文档。
+- 支持通过 `file_hash` 跳过重复文件。
+- 实现 txt / md 文档解析入口。
+- 实现 Markdown 图片占位符解析。
+- 创建 `document_assets` 表。
+- 实现 Markdown 图片复制、URL 生成和资产入库。
+- 实现解析脚本并更新文档状态。
 
 待完成：
 
-- 本地资料入库脚本。
-- 文档内容解析。
 - 普通 chunk 和父子 chunk 表设计。
 - chunk 切分与入库。
-- 图片资产抽取与登记。
+- docx 图片抽取与登记。
+- PDF 解析。
 - embedding 和 pgvector 入库。
 
 ### Milestone 4：RAG 问答
