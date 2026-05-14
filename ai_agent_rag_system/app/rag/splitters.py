@@ -110,7 +110,7 @@ def split_normal_chunks(text:str,file_type:str,
 
 
 
-def extract_markdown_headings(text: str) -> list[str]:
+def extract_markdown_headings(text: str) -> list[dict]:
     '''
     提取md文件中的标题
     '''
@@ -218,3 +218,151 @@ def merge_small_chunks(chunks:list[SplitChunk],min_chunk_size:int=120)->list[Spl
         )
 
     return reindexed
+
+# 父子切片
+def split_parent_child_chunks(
+        text:str,
+        file_type:str,
+        parent_chunk_size:int=1800,
+        parent_chunk_overlap:int=120,
+        child_chunk_size:int=400,
+        child_chunk_overlap:int=80
+)->list[ParentChildSplit]:
+    '''
+    1. 先用 parent splitter 把全文切成 parent chunks
+    2. 遍历每个 parent
+    3. 对 parent.content 再用 child splitter 切成 children
+    4. 每个 child 的 start_char / end_char 要换算回全文坐标
+    5. 返回 ParentChildSplit(parent=parent, children=children)
+    '''
+    headings = extract_markdown_headings(text) if file_type == "md" else []
+
+    # 对父块进行切块
+    parent_chunks:list[SplitChunk] = split_normal_chunks(
+        text=text,
+        file_type=file_type,
+        chunk_size=parent_chunk_size,
+        chunk_overlap=parent_chunk_overlap,
+    )
+
+    results:list[ParentChildSplit] = []
+
+    # 遍历每个父块,然后将每个父块切分成若干子块
+    for parent_index,parent in enumerate(parent_chunks):
+        # 获取切分器
+        child_splitter = build_text_splitter(file_type, child_chunk_size, child_chunk_overlap)
+
+        child_docs= child_splitter.create_documents(
+            texts=[parent.content],
+            metadatas=[{"file_type":file_type,"chunk_strategy":"parent_child"}]
+        )
+
+        children:list[SplitChunk] = []
+
+        # 将子块转为 SplitChunk
+        for child_index,child_doc in enumerate(child_docs):
+            metadata = dict(child_doc.metadata)
+            child_start_in_parent = metadata.pop("start_index",None)
+
+            if parent.start_char is not None and child_start_in_parent is not None:
+                start_char = parent.start_char + child_start_in_parent
+                end_char = start_char + len(child_doc.page_content)
+            else:
+                start_char = None
+                end_char = None
+
+            # 获取子块标题
+            heading_metadata = find_heading_metadata(
+                headings=headings,
+                start_char=start_char,
+                end_char=end_char,
+            )
+            
+            metadata = {
+                **remove_heading_metadata(parent.metadata),
+                **heading_metadata,
+                **metadata,
+            }
+
+            children.append(
+                SplitChunk(
+                    content=child_doc.page_content,
+                    chunk_index=child_index,
+                    start_char=start_char,
+                    end_char=end_char,
+                    metadata=metadata,
+                )
+            )
+
+        # 合并太小的chunk
+        children =  merge_small_chunks( children, min_chunk_size=80)
+
+        parent_heading_metadata = find_heading_at_position(
+            headings=headings,
+            position=parent.start_char,
+        )
+
+        results.append(
+            ParentChildSplit(
+                parent=SplitChunk(
+                    content=parent.content,
+                    chunk_index=parent_index,
+                    start_char=parent.start_char,
+                    end_char=parent.end_char,
+                    metadata={
+                        **remove_heading_metadata(parent.metadata),
+                        **parent_heading_metadata,
+                        "chunk_strategy": "parent_child",
+                        "chunk_role": "parent",
+                        "parent_chunk_size": parent_chunk_size,
+                        "parent_chunk_overlap": parent_chunk_overlap,
+                    },
+                ),
+                children=[
+                    SplitChunk(
+                        content=child.content,
+                        chunk_index=child.chunk_index,
+                        start_char=child.start_char,
+                        end_char=child.end_char,
+                        metadata={
+                            **child.metadata,
+                            "chunk_role": "child",
+                            "child_chunk_size": child_chunk_size,
+                            "child_chunk_overlap": child_chunk_overlap,
+                        },
+
+                    )
+                    for child in children
+                ]
+            )
+        )
+
+    return results
+
+
+# 再根据 parent.start_char 重新找标题：
+def find_heading_at_position(
+    headings: list[dict],
+    position: int | None,
+) -> dict:
+    if position is None:
+        return {}
+
+    matched: dict = {}
+
+    for heading in headings:
+        if heading["position"] <= position:
+            matched = heading["metadata"]
+            continue
+
+        break
+
+    return dict(matched)
+
+# 先删掉 parent.metadata 里旧的 heading 字段：
+def remove_heading_metadata(metadata: dict) -> dict:
+    return {
+        key: value
+        for key, value in metadata.items()
+        if not key.startswith("heading_")
+    }

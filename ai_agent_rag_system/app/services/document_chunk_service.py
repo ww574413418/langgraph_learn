@@ -66,16 +66,47 @@ def get_document_chunk(
     return db.get(DocumentChunk,chunk_id)
 
 
-def chunk_exist(db:Session,
-                document_id:UUID,
-                content_hash:str,
-                chunk_index:int,
-                chunk_type:str) ->bool:
-    statement = select(DocumentChunk.id).where(
-        DocumentChunk.document_id==document_id,
-        DocumentChunk.content_hash==content_hash,
-        DocumentChunk.chunk_type == chunk_type,
-        DocumentChunk.chunk_index==chunk_index
+# 直接复用get_existing_chunk 判断chunk在不在
+def chunk_exist(
+    db: Session,
+    document_id: UUID,
+    content_hash: str,
+    chunk_index: int,
+    chunk_type: str,
+    parent_id: UUID | None = None,
+) -> bool:
+    return (
+        get_existing_chunk(
+            db=db,
+            document_id=document_id,
+            content_hash=content_hash,
+            chunk_index=chunk_index,
+            chunk_type=chunk_type,
+            parent_id=parent_id,
+        )
+        is not None
     )
+
+
+def get_existing_chunk(
+    db: Session,
+    document_id: UUID,
+    content_hash: str,
+    chunk_index: int,
+    chunk_type: str,
+    parent_id: UUID | None = None,
+) -> DocumentChunk | None:
+    statement = select(DocumentChunk).where(
+        DocumentChunk.document_id == document_id,
+        DocumentChunk.content_hash == content_hash,
+        DocumentChunk.chunk_type == chunk_type,
+        DocumentChunk.chunk_index == chunk_index,
+    )
+
+    if parent_id is None:
+        statement = statement.where(DocumentChunk.parent_id.is_(None))
+    else:
+        statement = statement.where(DocumentChunk.parent_id == parent_id)
+
     result = db.execute(statement)
-    return result.scalar_one_or_none() is not None
+    return result.scalar_one_or_none()
