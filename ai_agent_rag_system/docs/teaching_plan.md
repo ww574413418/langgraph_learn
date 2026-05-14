@@ -56,7 +56,21 @@
 - 停止生成。
 - Agent 轨迹。
 
-### 2.3 每节课必须有产出
+### 2.3 成熟组件优先，自有结构落库
+
+RAG 和 Agent 的底层能力优先参考成熟组件，而不是为了练习而重造基础轮子。
+
+本项目采用的原则：
+
+- 文本切分优先使用 LangChain `MarkdownHeaderTextSplitter`、`RecursiveCharacterTextSplitter` 等成熟 splitter。
+- 父子 chunk 借鉴 LangChain `ParentDocumentRetriever` 的设计思想。
+- 数据仍然落到本项目自己的 PostgreSQL 表，例如 `documents`、`document_assets`、`document_chunks`。
+- 自己实现 metadata、图片 placeholder、父子关系、状态流转、去重和可追溯字段。
+- 后续可以把自有检索能力封装成 LangChain tool 或 retriever，供 LangGraph Agent 调用。
+
+这样既避免低质量自研 splitter，又能掌握工程系统里真正需要自己控制的数据结构和业务边界。
+
+### 2.4 每节课必须有产出
 
 每节课结束时至少完成一种产出：
 
@@ -67,7 +81,7 @@
 - 一个测试。
 - 一个 README 或设计说明。
 
-### 2.4 默认教学，不默认代写
+### 2.5 默认教学，不默认代写
 
 本项目默认采用教学模式：
 
@@ -236,12 +250,17 @@
 
 教学目标：
 
-- 跑通第一条 RAG 主链路。
+- 跑通第一条可维护的 RAG 文档入库和普通 chunk 主链路。
 
 讲解要点：
 
 - RAG 为什么需要文档解析、chunk、embedding、检索。
-- 普通 chunk 的适用场景。
+- 普通 chunk 的适用场景和局限。
+- 为什么不能使用简单固定字符硬切分作为生产方案。
+- 如何使用 LangChain `MarkdownHeaderTextSplitter` 保留 Markdown 标题结构。
+- 如何使用 LangChain `RecursiveCharacterTextSplitter` 做长度控制和 overlap。
+- 如何保留 `heading_path`、`contains_image`、`contains_code` 等 chunk metadata。
+- 为什么图片 placeholder 要保留在 chunk 文本中。
 - pgvector 的基本作用。
 - 引用来源怎么保存和返回。
 
@@ -249,7 +268,11 @@
 
 - 文档上传接口。
 - 文本文档解析。
-- 普通 chunk 切分。
+- Markdown 图片 placeholder 解析。
+- `document_assets` 入库。
+- 普通 chunk 表设计。
+- 使用 LangChain splitter 封装普通 chunk 切分。
+- chunk metadata 生成。
 - embedding provider 封装。
 - chunk 入库。
 - query 检索接口。
@@ -257,12 +280,16 @@
 验收标准：
 
 - 上传一份文本或 Markdown 文档。
+- Markdown 图片被保存为 `document_assets`。
+- chunk 文本中保留图片 placeholder。
 - 数据库中生成 chunks。
+- chunk 具有来源位置、标题上下文和基础 metadata。
 - 输入 query 可以召回相关 chunk。
 
 我会重点教你：
 
-- chunk size 怎么选。
+- chunk size 和 overlap 怎么选。
+- 为什么 splitter 应该被封装在 `app/rag/splitters.py`，而不是散落在 service 里。
 - embedding 调用应该在哪里封装。
 - 检索结果为什么不能直接等同最终回答。
 
@@ -277,19 +304,26 @@
 - 普通 chunk 的问题。
 - parent chunk 和 child chunk 的职责。
 - 为什么 child 负责召回，parent 负责上下文。
+- LangChain `ParentDocumentRetriever` 的基本思想。
+- 为什么本项目借鉴它的思路，但仍然自己把 parent / child chunk 写入 PostgreSQL。
+- parent / child 的 chunk_size 和 overlap 应该如何区分。
+- `document_chunks.parent_id` 如何表达父子关系。
 - 父子 chunk 如何去重和回填。
 
 实操任务：
 
 - 增加 chunk strategy 配置。
-- 实现 parent splitter。
-- 实现 child splitter。
-- 存储 `parent_chunk_id`。
-- 实现 parent-child retriever。
+- 使用 LangChain `RecursiveCharacterTextSplitter` 配置 parent splitter。
+- 使用 LangChain `RecursiveCharacterTextSplitter` 配置 child splitter。
+- 将 parent chunk 写入 `document_chunks(chunk_type="parent")`。
+- 将 child chunk 写入 `document_chunks(chunk_type="child", parent_id=...)`。
+- 实现 child 命中后回填 parent 的查询逻辑。
+- 后续将 pgvector child 检索封装成 retriever/tool。
 
 验收标准：
 
 - 同一份文档可以选择普通 chunk 或父子 chunk 入库。
+- parent 和 child 都能在 `document_chunks` 表中追溯。
 - query 命中 child 后能回填 parent。
 - 最终返回上下文比普通 chunk 更完整。
 
@@ -297,6 +331,7 @@
 
 - 为什么父子 chunk 是工程上的折中方案。
 - 如何防止回填 parent 后上下文过长。
+- 为什么成熟 splitter 解决的是文本切分，项目仍然需要自己处理 metadata、assets、状态和数据库关系。
 
 ## 9. 阶段七：Word 图片抽取和图片召回
 
@@ -381,6 +416,8 @@
 - Conditional Edge。
 - Agent 任务为什么需要事件记录。
 - Reviewer 为什么可以打回 Planner。
+- learn-claude-code / agent harness 类项目更强调工具调用、检索工具化、文件系统访问和长程任务执行。
+- 为什么 chunking 只是底层索引，Agent 还需要 semantic search、keyword search、read document 等工具。
 
 实操任务：
 
@@ -392,6 +429,8 @@
 - 实现 Reviewer Node。
 - 实现 Agent task API。
 - 前端展示 Agent 思考过程和执行轨迹。
+- 将 RAG 检索封装为 Agent tool。
+- 将读取 parent chunk / 原文片段 / 图片资产封装为可追溯工具。
 
 验收标准：
 

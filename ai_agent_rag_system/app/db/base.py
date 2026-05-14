@@ -8,3 +8,4 @@ from app.db.base_class import Base
 from app.models.knowledge_base import KnowledgeBase  # noqa: F401
 from app.models.document import Document
 from app.models.document_asset import DocumentAssets
+from app.models.document_chunk import DocumentChunk

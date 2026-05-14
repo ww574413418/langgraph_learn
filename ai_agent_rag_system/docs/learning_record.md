@@ -847,6 +847,12 @@
 - 解析失败时将 `documents.status` 更新为 `failed` 并记录 `error_message`。
 - 创建正式解析脚本 `scripts/parse_registered_documents.py`。
 - 验证解析脚本可以处理 `uploaded` 文档，并跳过暂未支持的 PDF 类型。
+- 设计 `document_chunks` 表，支持普通 chunk 和父子 chunk。
+- 讨论并确认 chunk 切分策略不采用简单硬切分，而是使用 LangChain 成熟 splitter。
+- 明确采用 `MarkdownHeaderTextSplitter` 保留 Markdown 标题结构。
+- 明确采用 `RecursiveCharacterTextSplitter` 做长度控制和 overlap。
+- 明确借鉴 LangChain `ParentDocumentRetriever` 的父子 chunk 思路，但仍由本项目自己落库到 PostgreSQL。
+- 对比 agent harness / learn-claude-code 类项目，理解 chunking 是底层索引，后续 Agent 还需要检索工具化和可追溯读取能力。
 
 今天写了哪些代码：
 
@@ -857,6 +863,10 @@
 - `app/services/document_parse_service.py`
 - `scripts/parse_registered_documents.py`
 - `migrations/versions/e349934e4513_create_document_assets.py`
+- `app/models/document_chunk.py`
+- `app/schemas/document_chunk.py`
+- `app/services/document_chunk_service.py`
+- `migrations/versions/e01cb6c9aa11_create_document_chunks.py`
 
 今天理解的关键概念：
 
@@ -867,6 +877,10 @@
 - `document_assets` 独立成表，比塞进 `documents.metadata` 更适合查询、关联、维护和召回。
 - 解析脚本应按 `status` 选择待处理文档。
 - 暂未支持的文件类型不应该轻易标为 `failed`，可以先跳过等待后续 loader。
+- 生产级 RAG 不应该只用固定字符数硬切文本。
+- LangChain 的 splitter 可以承担底层切分能力，但业务系统仍需要自己维护 metadata、图片 placeholder、父子关系和数据库结构。
+- 父子 chunk 的核心是 child 精准召回，parent 提供完整上下文。
+- `start_char` 和 `end_char` 是溯源字段，不是保证语义完整的字段。
 
 遇到的问题：
 
@@ -876,6 +890,8 @@
 - 直接 `python -c` 操作 ORM 时只导入了 `Document`，导致 SQLAlchemy metadata 中缺少 `knowledge_bases`，提交时出现外键解析错误。
 - 解析脚本最初错误导入 `from models.document import Document`，导致 `ModuleNotFoundError`。
 - PDF 暂未实现 loader，被解析脚本标记成 `failed`。
+- 初始讨论中考虑过自研 splitter，但进一步分析后确认应优先使用 LangChain 成熟组件并封装业务层。
+- `DocumentChunk` 模型中曾把 `embedding_model` 和 `metadata` 混在一起，需要拆成 `embedding_model` 和 `extra_metadata` 两个字段。
 
 解决方式：
 
@@ -885,10 +901,75 @@
 - 在脚本入口导入 `from app.db import base`，触发所有模型注册。
 - 所有项目内导入使用完整包路径 `app...`。
 - 解析脚本查询条件先限制为当前支持的 `txt`、`text`、`md`，PDF 保持待处理状态。
+- chunk 底层切分优先采用 `MarkdownHeaderTextSplitter` + `RecursiveCharacterTextSplitter`。
+- 父子 chunk 借鉴 `ParentDocumentRetriever` 思路，但将 parent/child 写入自有 `document_chunks` 表。
+- `embedding_model` 用于记录向量模型名称，后续真正的向量字段再使用 `embedding`。
 
 下次继续：
 
-- 设计 `document_chunks` 表，开始进入 RAG chunk 入库。
+- 封装基于 LangChain splitter 的 normal / parent_child 切分服务，并将 chunk 写入 `document_chunks` 表。
+
+### 日期：2026-05-13
+
+学习主题：
+
+- RAG 普通 chunk 切分策略、Markdown heading metadata、小块合并和 chunk 入库链路。
+
+今天完成：
+
+- 明确普通 chunk 不应该使用临时的字符硬切分，而应该基于成熟 splitter 进行工程封装。
+- 对比并选择了 LangChain 的 `MarkdownTextSplitter` 和 `RecursiveCharacterTextSplitter`。
+- 验证 `MarkdownTextSplitter` 能保留 Markdown 代码块格式，不会像 `MarkdownHeaderTextSplitter` 那样改写缩进。
+- 在 Markdown 切分结果中补充 heading metadata，例如 `heading_1`、`heading_2`、`heading_3`。
+- 实现普通 chunk 的小块合并策略，避免生成只有 ``` 或极短内容的无效 chunk。
+- 将 `data/md/数组.md` 验证为 10 个更合理的 normal chunks。
+- 初步跑通 `document_indexing_service`，把文档切分结果写入 `document_chunks` 表。
+
+今天写了哪些代码：
+
+- `app/rag/splitters.py`：封装 normal chunk 切分、Markdown heading 提取、小块合并。
+- `app/models/document_chunk.py`：定义 `document_chunks` ORM 模型。
+- `app/schemas/document_chunk.py`：定义 chunk 创建和读取 schema。
+- `app/services/document_chunk_service.py`：封装 chunk 写入、查询和存在性判断。
+- `app/services/document_indexing_service.py`：封装文档解析、切分、chunk 入库和文档状态更新。
+- `migrations/versions/e01cb6c9aa11_create_document_chunks.py`：创建 `document_chunks` 表。
+
+今天理解的关键概念：
+
+- chunk 不是简单切字符串，而是要尽量保留语义边界、代码块、标题层级和图片占位符。
+- Markdown 文档的 heading metadata 很重要，后续召回时可以帮助模型知道 chunk 属于哪个章节。
+- 图片不要直接塞进文本内容，而是用 `[IMAGE:asset_001]` 这类占位符和 `document_assets` 表建立稳定映射。
+- `content_hash` 可以用于判断内容重复，但 chunk 去重不能只看 `content_hash`，还要结合 `document_id`、`chunk_type`、`chunk_index`。
+- 小块合并属于工程质量问题，可以减少低价值 chunk，提高召回上下文质量。
+- 普通 chunk 和父子 chunk 应该共用 `document_chunks` 表，通过 `chunk_type` 和 `parent_id` 区分。
+
+遇到的问题：
+
+- 最初手写字符切分效果太粗糙，不符合生产可用要求。
+- `MarkdownHeaderTextSplitter` 会改变 Markdown 内容格式，尤其是代码缩进。
+- 只按 `content_hash` 判断 chunk 是否存在，会导致不同位置但内容相同的 chunk 被误跳过。
+- 小块合并逻辑一开始缩进有问题，导致只返回了一个 chunk。
+- 切分后的某些 chunk 会因为 overlap 以 ``` 开头，需要接受这是重叠上下文带来的结果，后续可继续优化。
+
+解决方式：
+
+- Markdown 文档使用 `MarkdownTextSplitter`，普通文本使用 `RecursiveCharacterTextSplitter`。
+- 手动扫描 Markdown 标题，并根据 chunk 的 `start_char` / `end_char` 补充 heading metadata。
+- 增加 `merge_small_chunks`，把过短 chunk 合并到前一个 chunk，并重新编号。
+- chunk 存在性判断改为结合文档、类型、序号和内容 hash。
+- 使用 `document_indexing_service` 承担“解析文档 -> 切分 -> 写 chunk -> 更新状态”的流程编排，`document_chunk_service` 只负责 chunk 数据库操作。
+
+还不理解的地方：
+
+- 父子 chunk 的 parent 和 child 应该如何选择不同大小，并在召回时如何返回 parent。
+- 后续 embedding 字段应该如何和 pgvector 结合。
+- 图片资产如何参与召回排序，以及图片 chunk 是否需要单独向量化。
+
+下次继续：
+
+- 用小块合并后的 splitter 重新清空并重建 `数组.md` 的 normal chunks。
+- 封装批量 indexing 脚本，处理所有已经 parsed 的文档。
+- 开始实现父子 chunk 切分与入库。
 
 ## 7. 里程碑记录
 
@@ -1000,11 +1081,18 @@
 - 创建 `document_assets` 表。
 - 实现 Markdown 图片复制、URL 生成和资产入库。
 - 实现解析脚本并更新文档状态。
+- 创建 `document_chunks` 表。
+- 实现普通 chunk 的 ORM、schema 和 service。
+- 基于 LangChain splitter 封装 normal chunk 切分。
+- 支持 Markdown heading metadata。
+- 支持过短 chunk 合并。
+- 初步跑通文档 normal chunk 入库链路。
 
 待完成：
 
-- 普通 chunk 和父子 chunk 表设计。
-- chunk 切分与入库。
+- 用小块合并后的策略重建并验证已入库 chunks。
+- 批量 chunk indexing 脚本。
+- 父子 chunk 切分与入库。
 - docx 图片抽取与登记。
 - PDF 解析。
 - embedding 和 pgvector 入库。
