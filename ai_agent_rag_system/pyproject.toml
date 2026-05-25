@@ -14,6 +14,7 @@ dependencies = [
     "redis>=5.2.1",
     "langchain>=0.3.14",
     "langgraph>=0.2.60",
+    "tiktoken>=0.8.0"
 ]
 
 [project.optional-dependencies]

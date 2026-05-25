@@ -9,6 +9,21 @@ RAG 模块需要支持两类文档检索能力：
 
 这个设计面向工程落地，不只追求能回答文本问题，也要能处理“示例图、流程图、截图、架构图很多”的文档。
 
+## 1.1 实现原则
+
+RAG 模块不以最小 demo 为目标，而以可维护、可验证、可扩展的生产级链路为目标。
+
+实现时遵循以下原则：
+
+- loader 只负责把不同文件格式解析成统一文档结构，不承担 chunk、embedding 或数据库写入职责。
+- splitter 只负责文本切分和 chunk metadata 生成，不直接访问数据库。
+- indexing service 负责编排解析、切分、幂等入库、状态更新和错误记录。
+- retrieval service 负责检索、父子 chunk 回填、去重、上下文组装和引用信息生成。
+- Agent / LangGraph 节点不直接操作数据库细节，而是调用稳定的 service 或 tool。
+- embedding 和 pgvector 是检索命中方式的一种实现，不应和父子 chunk 回填规则耦合。
+- 每个核心链路都要先能用 SQL 或 service 单独验证，再接入 Agent 工作流。
+- 任何“临时 keyword 检索”只能作为验证 child 命中与 parent 回填规则的教学步骤，不能作为最终生产检索方案。
+
 ## 2. Chunk 模式
 
 ### 2.1 普通 Chunk
@@ -206,6 +221,34 @@ query
   -> context assembly
 ```
 
+父子 chunk 回填规则：
+
+- retrieval service 接收已经命中的 child hits，而不是直接绑定某一种检索方式。
+- child hit 至少包含 `DocumentChunk` 和可选 `score`。
+- score 来自上游检索层，例如 pgvector similarity、BM25、RRF 或 rerank model，parent 回填层不负责计算分数。
+- 回填前必须校验命中的 chunk 是 `chunk_type = child`。
+- child 必须存在 `parent_id`。
+- `parent_id` 必须指向 `chunk_type = parent` 的 chunk。
+- parent 和 child 必须属于同一个 `document_id`。
+- 多个 child 命中同一个 parent 时，parent 只返回一次，避免重复上下文。
+- 同一个 parent 下多个 child 命中时，保留 score 最高的 child 作为 citation child。
+- 返回结果按 score 降序排列，score 为空的结果排在后面。
+- 返回 parent 内容作为主要上下文，但引用信息应保留命中的 child，便于解释“为什么召回这个 parent”。
+- 回填层不直接组装最终 prompt；prompt 上下文组装应在 context assembly 阶段处理 token budget、引用片段和图片资产。
+
+推荐结构：
+
+```text
+ChildChunkHit
+  -> chunk: DocumentChunk
+  -> score: float | None
+
+ParentBackfillResult
+  -> parent: DocumentChunk
+  -> child: DocumentChunk
+  -> score: float | None
+```
+
 ### 6.3 图片资产召回
 
 图片召回有三条路径：
@@ -237,6 +280,37 @@ query
 - 如果模型支持多模态，后续再把图片 URL 作为 image input。
 - 如果当前使用文本模型，回答时明确引用“相关图片见 assets”。
 - API 响应中单独返回 `assets` 数组。
+
+Context Assembly 职责：
+
+- 输入统一的 `ContextCandidate` 列表。
+- 按 score / rerank score 排序。
+- 使用模型 tokenizer 控制 token budget，不使用字符数作为最终预算。
+- 对超长 `context_chunk` 做可控截断。
+- 父子 chunk 场景下，优先围绕 `citation_chunk` 在 `context_chunk` 中的位置选取上下文窗口。
+- 为每个上下文块生成 citation id，例如 `C1`、`C2`。
+- citation 使用 `citation_chunk` 的 metadata 和 preview，因为它代表真正命中的证据片段。
+- 输出结构化 `AssembledContext`，包含 `context_text`、`citations`、`used_candidates`、`dropped_candidates`、`total_tokens`、`max_context_tokens` 和 `truncated`。
+- 不调用 LLM。
+- 不查数据库。
+- 不处理图片资产，只保留图片 placeholder，图片资产解析由后续 asset resolve 阶段负责。
+
+当前验证结果：
+
+- 能把 parent-child `ContextCandidate` 组装成带 citation id 的上下文。
+- 能限制总 token budget。
+- 能记录 used / dropped candidates。
+- 能标记 chunk 截断或候选丢弃。
+- 验证中发现代码类文档对上下文窗口更敏感。过小的 `max_chunk_tokens` 会导致代码片段不完整；增大 `max_context_tokens` 和 `max_chunk_tokens` 后，dropped candidate 消失，truncated 变为 false。
+- citation preview 如果显示代码块边界 ```，通常说明命中的 child 位于代码块边界附近。这可能需要在 child chunk 质量控制、retrieval 或 rerank 阶段处理，而不是由 context assembly 静默修正。
+
+Chunking budget 与 prompt context budget 区别：
+
+- chunking budget 在文档入库时使用，例如 `parent_chunk_size`、`child_chunk_size`、`chunk_overlap`，决定数据库中 chunk 的大小和结构。
+- prompt context budget 在用户提问时使用，例如 `max_context_tokens`、`max_chunk_tokens`、`citation_preview_tokens`，决定本次请求能放入 LLM prompt 的上下文规模。
+- 即使 parent chunk 入库时较大，也不代表每次请求都能完整放入 prompt。Context Assembly 必须根据模型窗口、系统 prompt、用户问题、历史消息、回答预留 tokens 和候选数量控制上下文。
+- 代码类文档通常需要更大的 `max_chunk_tokens`，否则函数体、分支和返回值容易被截断。
+- Context Assembly 应保留可配置 budget 参数，并允许上层根据模型、文档类型、检索模式和任务类型动态传入预算。
 
 响应结构：
 

@@ -108,6 +108,13 @@
 5. 写完马上验证。
 6. 最后总结为简历和面试表达。
 
+补充约定：
+
+- 默认由学习者自己实现代码，AI 负责讲解设计、拆解步骤、指出生产级注意事项，并在学习者贴出代码后进行 review。
+- 除非学习者明确要求“帮我写代码”“直接修改文件”，AI 不直接新增或修改业务代码。
+- 教学内容不以最小 demo 为目标，而以可维护、可扩展、可测试、能解释工程取舍的生产级实现为目标。
+- RAG 相关实现标准优先记录在 `rag_design.md`，学习进度记录在 `learning_record.md`，全局工程原则记录在 `development_plan.md`。
+
 ## 6. 每日学习记录模板
 
 后续每次学习可以按这个格式追加。
@@ -1056,7 +1063,7 @@
 
 ### Milestone 3：RAG 入库
 
-状态：已开始
+状态：normal chunk 与父子 chunk 入库主链路已跑通
 
 目标：
 
@@ -1087,12 +1094,31 @@
 - 支持 Markdown heading metadata。
 - 支持过短 chunk 合并。
 - 初步跑通文档 normal chunk 入库链路。
+- 验证 `数组.md` normal chunk 入库结果：10 个 normal chunk，`chunk_index` 从 0 到 9，metadata 中 heading 信息正常。
+- 通过清空旧 normal chunk 后重新 indexing，确认 normal splitter 结果稳定。
+- 实现并跑通批量 normal chunk indexing 脚本：从 `documents.status = parsed` 的文档批量入库，成功后变为 `indexed`。
+- 设计并实现 `split_parent_child_chunks()`。
+- 父子 chunk splitter 已验证：`数组.md` 切出 4 个 parent chunk、23 个 child chunk。
+- 修正父子 chunk metadata 语义：parent metadata 表示 parent 起点标题上下文，child metadata 表示 child 精确位置标题上下文。
+- 实现父子 chunk 入库：parent 使用 `chunk_type = "parent"`，child 使用 `chunk_type = "child"` 并通过 `parent_id` 关联 parent。
+- 实现父子 chunk 幂等逻辑：parent 已存在时复用 parent id，child 已存在时跳过，重复执行不会重复插入。
+- 验证 parent-child 数据库关系：4 个 parent 分别关联 6、6、6、5 个 child。
+- 设计并实现父子 chunk 查询回填 service：接收 child hits，通过 `parent_id` 回填 parent，并保留命中的 child 作为 citation child。
+- 验证父子 chunk 查询回填：多个 child 命中时可按 parent 去重，并保留 score 更高的 child。
+- 实现 token counter 抽象和 `TiktokenTokenCounter`，用于 Context Assembly 的 token budget 控制。
+- 设计并实现 Context Assembly 数据结构：`AssembledCitation`、`AssembledContext`、`SelectedContextText` 和 citation window offsets。
+- 实现 Context Assembly helper：候选排序、citation preview、context block 格式化、citation 构建、citation-centered context window、上下文文本选择。
+- 初步验证 `assemble_context()`：能生成带 `C1`、`C2` 的上下文，控制总 token 数，记录 used / dropped candidates，并标记 truncated。
+- 验证 Context Assembly budget 参数：`max_context_tokens=500`、`max_chunk_tokens=200` 时会出现 dropped candidate 和代码上下文不完整；调整为 `max_context_tokens=2000`、`max_chunk_tokens=900` 后，used=3、dropped=0、truncated=false。
+- 理解 chunking budget 与 prompt context budget 的区别：前者决定入库时怎么切 chunk，后者决定一次提问时给 LLM 放多少上下文。
+- 明确代码类文档通常需要更大的 prompt context window，不能简单依赖入库时的 parent chunk 大小。
 
 待完成：
 
-- 用小块合并后的策略重建并验证已入库 chunks。
-- 批量 chunk indexing 脚本。
-- 父子 chunk 切分与入库。
+- retrieval pipeline 分层设计：vector search、keyword search、RRF、rerank、parent backfill、context assembly。
+- 动态 token budget 策略：根据模型窗口、任务类型、retrieval mode、文档类型和候选数量决定 `max_context_tokens`、`max_chunk_tokens`、`citation_preview_tokens`。
+- child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
+- 父子 chunk 批量 indexing 脚本或 indexing strategy 参数化。
 - docx 图片抽取与登记。
 - PDF 解析。
 - embedding 和 pgvector 入库。
