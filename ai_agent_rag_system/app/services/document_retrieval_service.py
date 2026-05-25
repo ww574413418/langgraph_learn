@@ -6,6 +6,7 @@
 '''
 from uuid import UUID
 from app.models.document_chunk import DocumentChunk
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 from app.rag.retrieval_types import ChunkHit, ContextCandidate,RetrievalSource,RetrievalMode
 
@@ -169,6 +170,75 @@ def normalize_normal_chunk_hits(
     )
 
     return candidates[:max_contexts]
+
+# 通过关键字 like 去搜 chunk
+def search_chunks_by_keyword(
+    db: Session,
+    query: str,
+    chunk_type: str,
+    document_ids: list[UUID] | None = None,
+    top_k: int = 5,
+) -> list[ChunkHit]:
+    """
+    最小 keyword retrieval。
+
+    当前使用 ILIKE 做子串匹配，目标是先跑通 retrieval pipeline。
+    后续可以替换为 BM25、pg_trgm、pgvector 或 hybrid search。
+    """
+
+    normalized_query = query.strip()
+
+    if not normalized_query:
+        return []
+
+    stmt = select(DocumentChunk).where(
+        DocumentChunk.chunk_type == chunk_type,
+        DocumentChunk.content.ilike(f"%{normalized_query}%"),
+    )
+
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
+
+    stmt = stmt.limit(top_k)
+
+    chunks = db.scalars(stmt).all()
+
+    return [
+        ChunkHit(
+            chunk=chunk,
+            score=calculate_keyword_score(
+                content=chunk.content,
+                query=normalized_query,
+            ),
+            retrieval_source="keyword",
+        )
+        for chunk in chunks
+    ]
+
+def calculate_keyword_score(
+    content: str,
+    query: str,
+) -> float:
+    """
+    最小 keyword score。
+
+    不是 BM25，只用于让 ChunkHit 有稳定分数。
+    """
+
+    normalized_content = content.lower()
+    normalized_query = query.lower()
+
+    if not normalized_query:
+        return 0.0
+
+    exact_count = normalized_content.count(normalized_query)
+
+    if exact_count == 0:
+        return 0.0
+
+    length_penalty = max(len(normalized_content), 1)
+
+    return exact_count / length_penalty
 
 #  retrieval pipeline 的统一入口
 def retrieve_context_candidates(

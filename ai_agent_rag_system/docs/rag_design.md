@@ -323,6 +323,14 @@ Chunking budget 与 prompt context budget 区别：
 - `build_token_budget_request_from_candidates()` 可从 `ContextCandidate` 列表推断 `candidate_count`、`retrieval_mode` 和 `document_types`。
 - `assemble_context_with_dynamic_budget()` 是后续 retrieval / chat pipeline 更适合调用的入口，底层 `assemble_context()` 继续保留显式预算参数，方便测试和调试。
 
+最小 keyword retrieval：
+
+- 当前已在 `app/services/document_retrieval_service.py` 实现 `search_chunks_by_keyword()`，使用 PostgreSQL `ILIKE` 做子串匹配。
+- 该实现不是 BM25，目标是先跑通 retrieval pipeline 的边界：`query -> list[ChunkHit]`。
+- `calculate_keyword_score()` 目前只提供稳定的粗粒度分数，后续可替换为 BM25、`pg_trgm`、向量检索或 hybrid RRF。
+- keyword retrieval 只负责返回 `ChunkHit`，不做 parent backfill、不做 context assembly。
+- PostgreSQL integration test 已覆盖 keyword score、真实表查询、`chunk_type` 过滤和 `document_ids` 限定，避免本地历史数据影响测试结果。
+
 响应结构：
 
 ```json

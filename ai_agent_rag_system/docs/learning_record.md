@@ -1116,10 +1116,14 @@
 - 实现 `build_token_budget_request_from_candidates()`，可从 `ContextCandidate` 自动推断候选数量、retrieval mode 和文档类型；代码类文本会被标记为 `code` 类型以提高预算。
 - 实现 `assemble_context_with_dynamic_budget()`，作为后续 retrieval / chat pipeline 的动态预算上下文组装入口，同时保留 `assemble_context()` 显式预算接口。
 - 新增 `tests/test_token_budget.py`，验证动态预算 wrapper、parent-child 预算、代码类文档预算、长历史压缩预算和候选 metadata 自动推断；当前 `pytest tests/test_token_budget.py` 结果为 5 passed。
+- 实现最小 keyword retrieval：`search_chunks_by_keyword()` 使用 PostgreSQL `ILIKE` 查询指定 `chunk_type` 的 `DocumentChunk.content`，返回统一的 `ChunkHit`。
+- 实现 `calculate_keyword_score()`，当前作为非 BM25 的粗粒度 keyword score，后续可替换为 BM25、`pg_trgm`、向量检索或 hybrid RRF。
+- 新增 `tests/test_document_retrieval.py`，先验证 score 纯函数，再使用真实 PostgreSQL integration test 验证 keyword retrieval 的 chunk 命中、`chunk_type` 过滤和 `document_ids` 限定；当前结果为 5 passed。
+- 验证过程中确认 SQLite 不适合当前 ORM integration test，因为模型使用 PostgreSQL 专属 `JSONB` 类型；后续数据库层测试优先使用 PostgreSQL。
 
 待完成：
 
-- retrieval pipeline 分层设计：vector search、keyword search、RRF、rerank、parent backfill、context assembly。
+- retrieval pipeline 分层设计：normal keyword context、parent-child keyword context、vector search、RRF、rerank、parent backfill、context assembly。
 - child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
 - 父子 chunk 批量 indexing 脚本或 indexing strategy 参数化。
 - docx 图片抽取与登记。
