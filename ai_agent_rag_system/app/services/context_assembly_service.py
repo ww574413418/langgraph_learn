@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from uuid import UUID
 from app.rag.retrieval_types import ContextCandidate
 from app.rag.tokenizers import TokenCounter
+from app.rag.token_budget import (
+    TaskType,
+    TokenBudgetPlan,
+    build_dynamic_token_budget,
+    build_token_budget_request_from_candidates,
+)
 
 @dataclass
 class AssembledCitation:
@@ -325,3 +331,45 @@ def assemble_context(
         max_context_tokens=max_context_tokens,
         truncated=truncated,
     )
+
+def assemble_context_with_dynamic_budget(
+    candidates: list[ContextCandidate],
+    token_counter: TokenCounter,
+    *,
+    model_name: str | None = None,
+    model_context_window: int | None = None,
+    task_type: TaskType = "qa",
+    user_query_tokens: int = 200,
+    history_tokens: int = 0,
+    system_prompt_tokens: int = 800,
+    reserved_answer_tokens: int | None = None,
+) -> tuple[AssembledContext, TokenBudgetPlan]:
+    """
+    使用动态 token budget 组装 RAG context。
+
+    这个函数是上层 retrieval / chat pipeline 更适合调用的入口。
+    原来的 assemble_context() 继续保留，方便显式传预算和单元测试。
+    """
+
+    budget_request = build_token_budget_request_from_candidates(
+        candidates,
+        model_name=model_name,
+        model_context_window=model_context_window,
+        task_type=task_type,
+        user_query_tokens=user_query_tokens,
+        history_tokens=history_tokens,
+        system_prompt_tokens=system_prompt_tokens,
+        reserved_answer_tokens=reserved_answer_tokens,
+    )
+
+    budget_plan = build_dynamic_token_budget(budget_request)
+
+    assembled_context = assemble_context(
+        candidates=candidates,
+        token_counter=token_counter,
+        max_context_tokens=budget_plan.max_context_tokens,
+        max_chunk_tokens=budget_plan.max_chunk_tokens,
+        citation_preview_tokens=budget_plan.citation_preview_tokens,
+    )
+
+    return assembled_context, budget_plan

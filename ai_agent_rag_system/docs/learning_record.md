@@ -1112,11 +1112,14 @@
 - 验证 Context Assembly budget 参数：`max_context_tokens=500`、`max_chunk_tokens=200` 时会出现 dropped candidate 和代码上下文不完整；调整为 `max_context_tokens=2000`、`max_chunk_tokens=900` 后，used=3、dropped=0、truncated=false。
 - 理解 chunking budget 与 prompt context budget 的区别：前者决定入库时怎么切 chunk，后者决定一次提问时给 LLM 放多少上下文。
 - 明确代码类文档通常需要更大的 prompt context window，不能简单依赖入库时的 parent chunk 大小。
+- 分步实现动态 token budget 策略：定义 `TokenBudgetRequest` / `TokenBudgetPlan`，实现模型窗口推断、回答 token 预留、可用 prompt tokens 计算、RAG context 总预算、单 chunk 预算和 citation preview 预算。
+- 实现 `build_token_budget_request_from_candidates()`，可从 `ContextCandidate` 自动推断候选数量、retrieval mode 和文档类型；代码类文本会被标记为 `code` 类型以提高预算。
+- 实现 `assemble_context_with_dynamic_budget()`，作为后续 retrieval / chat pipeline 的动态预算上下文组装入口，同时保留 `assemble_context()` 显式预算接口。
+- 新增 `tests/test_token_budget.py`，验证动态预算 wrapper、parent-child 预算、代码类文档预算、长历史压缩预算和候选 metadata 自动推断；当前 `pytest tests/test_token_budget.py` 结果为 5 passed。
 
 待完成：
 
 - retrieval pipeline 分层设计：vector search、keyword search、RRF、rerank、parent backfill、context assembly。
-- 动态 token budget 策略：根据模型窗口、任务类型、retrieval mode、文档类型和候选数量决定 `max_context_tokens`、`max_chunk_tokens`、`citation_preview_tokens`。
 - child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
 - 父子 chunk 批量 indexing 脚本或 indexing strategy 参数化。
 - docx 图片抽取与登记。

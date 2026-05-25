@@ -312,6 +312,17 @@ Chunking budget 与 prompt context budget 区别：
 - 代码类文档通常需要更大的 `max_chunk_tokens`，否则函数体、分支和返回值容易被截断。
 - Context Assembly 应保留可配置 budget 参数，并允许上层根据模型、文档类型、检索模式和任务类型动态传入预算。
 
+动态 token budget 当前策略：
+
+- 策略模块：`app/rag/token_budget.py`。
+- 输入结构：`TokenBudgetRequest`，包含模型窗口、任务类型、retrieval mode、候选数量、文档类型、用户问题 tokens、历史 tokens、系统 prompt tokens 和回答预留 tokens。
+- 输出结构：`TokenBudgetPlan`，包含 `max_context_tokens`、`max_chunk_tokens`、`citation_preview_tokens`、实际模型窗口、可用 prompt tokens 和回答预留 tokens。
+- 预算计算先从模型窗口扣除系统 prompt、用户问题、历史消息和回答预留，再从剩余空间中按任务类型、retrieval mode 和文档类型切出 RAG context 总预算。
+- `parent_child` 模式会提高上下文比例和单 chunk 下限，因为最终上下文来自 parent chunk。
+- 代码类文档或代码类任务会提高单 chunk 下限和 citation preview，避免代码片段过短。
+- `build_token_budget_request_from_candidates()` 可从 `ContextCandidate` 列表推断 `candidate_count`、`retrieval_mode` 和 `document_types`。
+- `assemble_context_with_dynamic_budget()` 是后续 retrieval / chat pipeline 更适合调用的入口，底层 `assemble_context()` 继续保留显式预算参数，方便测试和调试。
+
 响应结构：
 
 ```json
