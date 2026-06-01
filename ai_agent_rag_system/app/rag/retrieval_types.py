@@ -1,16 +1,20 @@
-'''
-RAG 检索链路的统一数据结构。
-
-用于连接候选召回、父子 chunk 回填、rerank 和上下文组装。
-不是最终直接传给 LLM 的 prompt 格式。
-'''
-
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
+
 from app.models.document_chunk import DocumentChunk
 
 
-RetrievalSource = Literal["vector", "keyword", "hybrid", "rerank", "manual"]
+RetrievalSource = Literal[
+    "vector",
+    "keyword",
+    "bm25",
+    "pg_trgm",
+    "full_text",
+    "hybrid",
+    "rerank",
+    "manual",
+]
+
 RetrievalMode = Literal["normal", "parent_child"]
 
 
@@ -18,7 +22,23 @@ RetrievalMode = Literal["normal", "parent_child"]
 class ChunkHit:
     chunk: DocumentChunk
     score: float | None = None
+    rank: int | None = None
     retrieval_source: RetrievalSource = "manual"
+    raw_score: float | None = None
+    normalized_score: float | None = None
+    extra_metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class RetrievalTrace:
+    query: str
+    mode: RetrievalMode
+    sources: list[RetrievalSource]
+    total_hits: int
+    used_hits: int
+    source_hit_counts: dict[str, int] = field(default_factory=dict)
+    dropped_hit_counts: dict[str, int] = field(default_factory=dict)
+    extra_metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -26,5 +46,13 @@ class ContextCandidate:
     context_chunk: DocumentChunk
     citation_chunk: DocumentChunk
     score: float | None = None
+    rank: int | None = None
     retrieval_mode: RetrievalMode = "normal"
     retrieval_source: RetrievalSource = "manual"
+    extra_metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class RetrievalResult:
+    candidates: list[ContextCandidate]
+    trace: RetrievalTrace

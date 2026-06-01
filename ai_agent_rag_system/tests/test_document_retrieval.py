@@ -11,6 +11,7 @@ from app.models.knowledge_base import KnowledgeBase
 from app.services.document_retrieval_service import (
     calculate_keyword_score,
     search_chunks_by_keyword,
+    retrieve_context_candidates
 )
 
 def test_calculate_keyword_score_returns_zero_for_empty_query() -> None:
@@ -184,6 +185,139 @@ def test_search_chunks_by_keyword_filters_by_chunk_type() -> None:
         assert len(hits) == 1
         assert hits[0].chunk.id == child.id
 
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_search_chunks_by_keyword_empty_document_scope_returns_no_hits() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="RAG retrieval must not leak across an empty document scope.",
+            chunk_index=0,
+        )
+
+        hits = search_chunks_by_keyword(
+            db=db,
+            query="retrieval",
+            chunk_type="normal",
+            document_ids=[],
+            top_k=5,
+        )
+
+        assert hits == []
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_candidates_normal_mode_adds_rank() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="RAG retrieval uses keyword search.",
+            chunk_index=0,
+        )
+
+        items = retrieve_context_candidates(
+            db=db,
+            query="retrieval",
+            document_ids=[document.id],
+            mode="normal",
+            top_k=5,
+        )
+
+        assert len(items) == 1
+        assert items[0].retrieval_mode == "normal"
+        assert items[0].context_chunk.id == items[0].citation_chunk.id
+        assert items[0].rank == 1
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+from uuid import uuid4
+from app.models.document_chunk import DocumentChunk
+from app.services.document_retrieval_service import retrieve_context_candidates
+
+def test_retrieve_context_candidates_parent_child_backfills_parent() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        parent = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="parent",
+            content="Parent content.",
+            chunk_index=0,
+        )
+
+        child = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content="Child mentions retrieval keyword.",
+            chunk_index=1,
+        )
+
+        db.query(DocumentChunk).filter(DocumentChunk.id == child.id).update(
+            {"parent_id": parent.id}
+        )
+        db.commit()
+        db.refresh(child)
+
+        items = retrieve_context_candidates(
+            db=db,
+            query="retrieval",
+            document_ids=[document.id],
+            mode="parent_child",
+            top_k=5,
+        )
+
+        assert len(items) == 1
+        assert items[0].retrieval_mode == "parent_child"
+        assert items[0].context_chunk.id == parent.id
+        assert items[0].citation_chunk.id == child.id
+        assert items[0].rank == 1
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+from app.services.document_retrieval_service import retrieve_context
+
+def test_retrieve_context_parent_child_best_effort_tracks_orphan_children() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content="retrieval keyword but missing parent.",
+            chunk_index=0,
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="retrieval",
+            document_ids=[document.id],
+            mode="parent_child",
+            top_k=5,
+        )
+
+        assert result.candidates == []
+        assert result.trace.dropped_hit_counts.get("orphan_child") == 1
     finally:
         cleanup_test_document(db, document)
         db.close()

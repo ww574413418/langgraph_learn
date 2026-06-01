@@ -113,6 +113,8 @@
 - 默认由学习者自己实现代码，AI 负责讲解设计、拆解步骤、指出生产级注意事项，并在学习者贴出代码后进行 review。
 - 除非学习者明确要求“帮我写代码”“直接修改文件”，AI 不直接新增或修改业务代码。
 - 教学内容不以最小 demo 为目标，而以可维护、可扩展、可测试、能解释工程取舍的生产级实现为目标。
+- 教学方案默认不采用“先跑通最小链路”的推进方式。后续讲解应先给生产级方案，包括架构边界、数据结构、组件取舍、异常处理、测试策略和演进路径，再拆成实现步骤。
+- 如果需要最小可执行路径，必须由学习者明确提出，或先说明它只是验证手段，不作为默认方案。
 - RAG 相关实现标准优先记录在 `rag_design.md`，学习进度记录在 `learning_record.md`，全局工程原则记录在 `development_plan.md`。
 
 ## 6. 每日学习记录模板
@@ -1120,6 +1122,10 @@
 - 实现 `calculate_keyword_score()`，当前作为非 BM25 的粗粒度 keyword score，后续可替换为 BM25、`pg_trgm`、向量检索或 hybrid RRF。
 - 新增 `tests/test_document_retrieval.py`，先验证 score 纯函数，再使用真实 PostgreSQL integration test 验证 keyword retrieval 的 chunk 命中、`chunk_type` 过滤和 `document_ids` 限定；当前结果为 5 passed。
 - 验证过程中确认 SQLite 不适合当前 ORM integration test，因为模型使用 PostgreSQL 专属 `JSONB` 类型；后续数据库层测试优先使用 PostgreSQL。
+- 实现检索统一入口 `retrieve_context()`：对外输出 `RetrievalResult(candidates + trace)`，并保留 `retrieve_context_candidates()` 兼容层，避免上层调用方与检索实现细节耦合。
+- 将检索入口生产化：加入 `top_k` 硬边界、稳定排序与 `rank`、父子 chunk best-effort 回填（坏数据不导致 500）、并在 `trace.dropped_hit_counts` 中记录 orphan child 数量，提升可观测性与线上可排障能力。
+- 新增 3 个检索入口测试用例覆盖 normal / parent-child / best-effort dropped trace；全量 `pytest -q` 结果为 24 passed。
+- 决定后续 Retrieval API 采用 `POST /api/retrieval`，并规划请求/响应 schema：返回 `context_text + citations + budget_plan + trace`，为后续接入向量检索与 rerank 预留演进空间。
 
 待完成：
 
