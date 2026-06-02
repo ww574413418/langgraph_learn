@@ -13,9 +13,13 @@ from app.rag.retrieval_types import (
     ContextCandidate,
     RetrievalSource,
     RetrievalMode,
+    RetrievalStrategy,
     RetrievalTrace,
     RetrievalResult
 )
+from app.rag.embeddings import EmbeddingProvider
+from app.rag.vector_store import search_chunks_by_vector
+from app.rag.retrieval_types import ChunkHit
 
 
 
@@ -297,6 +301,8 @@ def retrieve_context(
     query: str,
     document_ids: list[UUID] | None = None,
     mode: RetrievalMode = "parent_child",
+    strategy: RetrievalStrategy = "keyword",
+    embedding_provider: EmbeddingProvider | None = None,
     top_k: int = 5,
 ) -> RetrievalResult:
     """
@@ -322,14 +328,30 @@ def retrieve_context(
     if mode not in ("normal", "parent_child"):
         raise ValueError("Invalid retrieval mode")
 
+    if strategy not in ("keyword", "vector"):
+        raise ValueError("Invalid retrieval strategy")
+
+    if strategy == "vector" and embedding_provider is None:
+        raise ValueError("embedding_provider is required for vector retrieval")
+
     if mode == "normal":
-        hits = search_chunks_by_keyword(
-            db=db,
-            query=normalized_query,
-            chunk_type="normal",
-            document_ids=document_ids,
-            top_k=top_k,
-        )
+        if strategy == "keyword":
+            hits = search_chunks_by_keyword(
+                db=db,
+                query=normalized_query,
+                chunk_type="normal",
+                document_ids=document_ids,
+                top_k=top_k,
+            )
+        else:
+            hits = search_normal_chunks_by_vector(
+                db=db,
+                query=normalized_query,
+                embedding_provider=embedding_provider,
+                document_ids=document_ids,
+                top_k=top_k,
+            )
+
         candidates = normalize_normal_chunk_hits(hits=hits, max_contexts=top_k)
         candidates = _stable_sort_and_rank(candidates)
         return RetrievalResult(
@@ -337,21 +359,31 @@ def retrieve_context(
             trace=RetrievalTrace(
                 query=query,
                 mode=mode,
-                sources=["keyword"],
+                sources=[strategy],
                 total_hits=len(hits),
                 used_hits=len(candidates),
-                source_hit_counts={"keyword": len(hits)},
+                source_hit_counts={strategy: len(hits)},
                 dropped_hit_counts={},
             ),
         )
 
-    child_hits = search_chunks_by_keyword(
-        db=db,
-        query=normalized_query,
-        chunk_type="child",
-        document_ids=document_ids,
-        top_k=top_k,
-    )
+    if strategy == "keyword":
+        child_hits = search_chunks_by_keyword(
+            db=db,
+            query=normalized_query,
+            chunk_type="child",
+            document_ids=document_ids,
+            top_k=top_k,
+        )
+    else:
+        child_hits = search_child_chunks_by_vector(
+            db=db,
+            query=normalized_query,
+            embedding_provider=embedding_provider,
+            document_ids=document_ids,
+            top_k=top_k,
+        )
+
     candidates, orphan_children = retrieve_parent_contexts_best_effort(
         db=db,
         child_hits=child_hits,
@@ -369,10 +401,95 @@ def retrieve_context(
         trace=RetrievalTrace(
             query=query,
             mode=mode,
-            sources=["keyword"],
+            # 不要写死 keyword。
+            # parent_child 分支现在也支持 keyword / vector 两种 strategy。
+            sources=[strategy],
             total_hits=len(child_hits),
             used_hits=len(candidates),
-            source_hit_counts={"keyword": len(child_hits)},
+            # trace 必须记录真实检索来源。
+            # 否则前端/日志/评估都会误以为这次走的是 keyword。
+            source_hit_counts={strategy: len(child_hits)},
             dropped_hit_counts=dropped,
         ),
+    )
+
+
+def search_normal_chunks_by_vector(
+    db: Session,
+    *,
+    query: str,
+    embedding_provider: EmbeddingProvider,
+    document_ids: list[UUID] | None = None,
+    top_k: int = 5,
+) -> list[ChunkHit]:
+    """
+    这是 retrieval service 层的编排函数。
+
+    它负责：
+    1. 把 query 转成 embedding
+    2. 调 vector_store 做数据库检索
+
+    注意：
+    - embedding_provider 从外部传入，方便测试替换。
+    - 不要在这里直接写 OpenAI client。
+    """
+
+    normalized_query = query.strip()
+
+    if not normalized_query:
+        return []
+
+    query_embedding = embedding_provider.embed_query(normalized_query)
+
+    return search_chunks_by_vector(
+        db=db,
+        query_embedding=query_embedding,
+        chunk_type="normal",
+        embedding_model=embedding_provider.model_name,
+        embedding_dimensions=embedding_provider.dimensions,
+        document_ids=document_ids,
+        top_k=top_k,
+    )
+
+
+def search_child_chunks_by_vector(
+    db: Session,
+    *,
+    query: str,
+    embedding_provider: EmbeddingProvider,
+    document_ids: list[UUID] | None = None,
+    top_k: int = 5,
+) -> list[ChunkHit]:
+    """
+    用 vector 检索 child chunk。
+
+    为什么检索 child，而不是 parent？
+
+    parent chunk 更长，语义更宽，适合作为上下文；
+    child chunk 更短，语义更集中，适合作为召回单元。
+
+    所以 parent-child RAG 的典型流程是：
+
+        query -> 检索 child -> 回填 parent -> parent 进上下文
+
+    这能兼顾：
+    - 召回精准度
+    - 上下文完整度
+    """
+
+    normalized_query = query.strip()
+
+    if not normalized_query:
+        return []
+
+    query_embedding = embedding_provider.embed_query(normalized_query)
+
+    return search_chunks_by_vector(
+        db=db,
+        query_embedding=query_embedding,
+        chunk_type="child",
+        embedding_model=embedding_provider.model_name,
+        embedding_dimensions=embedding_provider.dimensions,
+        document_ids=document_ids,
+        top_k=top_k,
     )

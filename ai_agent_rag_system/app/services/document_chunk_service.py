@@ -9,11 +9,15 @@ def create_document_chunk(
         db:Session,
         data:DocumentChunkCreate,
 )->DocumentChunk:
-    document = db.get(Document,data.document_id)
+    # 业务层必须先验证 document 是否存在。
+    # 不要等数据库外键报错，因为数据库错误对 API 和测试都不友好。
+    document = db.get(Document, data.document_id)
 
     if document is None:
         raise ValueError("Document not found")
 
+    # 如果是 child chunk，必须确认 parent 存在且属于同一篇文档。
+    # 这是父子 chunk 的数据一致性边界。
     if data.parent_id is not None:
         parent = db.get(DocumentChunk,data.parent_id)
 
@@ -34,7 +38,10 @@ def create_document_chunk(
         char_count=data.char_count,
         start_char=data.start_char,
         end_char=data.end_char,
+        # embedding 相关字段必须和 chunk 同时入库，避免出现“文本已索引但无法向量检索”的半成品状态。
         embedding_model=data.embedding_model,
+        embedding=data.embedding,
+        embedding_dimensions=data.embedding_dimensions,
         extra_metadata=data.extra_metadata,
     )
 

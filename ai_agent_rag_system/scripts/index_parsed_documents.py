@@ -11,12 +11,15 @@ from sqlalchemy import select
 from app.db.session import  SessionLocal
 from app.models.document import Document
 from app.services.document_indexing_service import index_document_normal_chunks
+from app.rag.embeddings import create_embedding_provider
+
 
 
 def index_parsed_documents(limit: int | None = None,
                            chunk_size: int = 800,
                            chunk_overlap: int = 120,) -> None:
     db = SessionLocal()
+    embedding_provider = create_embedding_provider()
 
     try:
         statement = select(Document).where(Document.status=="parsed").order_by(Document.created_at.asc())
@@ -32,6 +35,7 @@ def index_parsed_documents(limit: int | None = None,
             try:
                 index_document_normal_chunks(db=db,
                                              document=document,
+                                             embedding_provider=embedding_provider,
                                              chunk_size=chunk_size,
                                              chunk_overlap=chunk_overlap)
 

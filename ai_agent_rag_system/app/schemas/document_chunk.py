@@ -13,7 +13,17 @@ class DocumentChunkCreate(BaseModel):
     char_count:int = 0
     start_char:int | None = None
     end_char:int | None = None
-    embedding_model:str | None = None
+    # 记录向量来自哪个模型。
+    # 生产中不能只保存 embedding，不保存模型名，否则以后换模型会混用不同向量空间。
+    embedding_model: str | None = None
+
+    # 真正写入 pgvector 的向量。
+    # 测试阶段可以用 DeterministicEmbeddingProvider，生产阶段再换 OpenAI embedding provider。
+    embedding: list[float] | None = None
+
+    # 保存维度，便于查询时过滤，也方便排查线上数据问题。
+    embedding_dimensions: int | None = None
+
     extra_metadata:dict =  Field(default_factory=dict)
 
 class DocumentChunkRead(BaseModel):

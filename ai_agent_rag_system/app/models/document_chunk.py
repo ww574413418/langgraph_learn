@@ -4,6 +4,9 @@ from sqlalchemy import DateTime,ForeignKey,Integer,String,Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import mapped_column,Mapped
 from app.db.base_class import Base
+from pgvector.sqlalchemy import Vector
+from app.core.config import settings
+
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
@@ -61,6 +64,15 @@ class DocumentChunk(Base):
     embedding_model:Mapped[str | None] = mapped_column(
         String(100),
         nullable=True
+    )
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(settings.embedding_dimensions),
+        nullable=True,
+    )
+
+    embedding_dimensions: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
 
     extra_metadata:Mapped[dict] = mapped_column(

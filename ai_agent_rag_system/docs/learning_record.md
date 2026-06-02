@@ -2,11 +2,29 @@
 
 记录日期：2026-04-30
 
+最近同步：2026-06-02
+
 学习项目：`AI Agent Knowledge Workspace`
 
 学习目标：通过一个具备工程落地能力的项目，串联 FastAPI、Vue、PostgreSQL、Redis、LangChain、LangGraph、Multi-Agent、RAG、父子 chunk、图片召回、流式输出和 Agent 工作流。
 
 ## 1. 当前学习状态
+
+最新进度摘要：
+
+- 当前已经完成知识库、文档登记、文档解析入口、Markdown 图片资产、normal chunk、parent-child chunk、Context Assembly、动态 token budget、Retrieval API、Embedding Provider 抽象和 pgvector 字段迁移。
+- `POST /api/retrieval` 链路已经接通，能从 API 层返回 `context_text`、`citations`、`budget_plan` 和 `trace`。
+- parent-child retrieval 已完成重复实现清理，当前保留单条 parent 校验和 best-effort 批量回填两类入口。
+- 已修复 `document_ids == []` 退化成全库检索的边界问题，避免空知识库范围泄露其他文档。
+- 已实现 `DeterministicEmbeddingProvider`，用于无网络、无 API Key、稳定可复现的 embedding 测试。
+- `document_chunks` 表已经增加 `embedding vector(8)` 和 `embedding_dimensions integer` 字段，Alembic 迁移已执行到 head。
+- 文档体系已经整理完成：长期设计看 `development_plan.md` / `rag_design.md` / `frontend_design.md`，学习路线看 roadmap，复习看 `docs/notes/`，流水账看本文件。
+
+当前最重要的下一步：
+
+- 让 chunk 入库时生成并写入 embedding。
+- 实现 pgvector vector search。
+- 再把 keyword retrieval 和 vector retrieval 组合成 hybrid retrieval，为 RRF 和 rerank 做准备。
 
 你已经完成或正在形成的基础：
 
@@ -14,6 +32,7 @@
 - 已经学习过 LangGraph 的串行、分支、循环、持久化、短期记忆、人机交互、工具调用、流式输出等内容。
 - 已经把旧的 LangGraph 学习资料整理到 `langgraph_learning/`。
 - 已经明确不想再按零散知识点逐个学习，而是希望通过项目贯穿知识体系。
+- 已经通过当前项目完成 RAG 入库、检索 API、token budget 和 embedding 数据模型的第一轮工程实践。
 
 当前项目方向已经确定：
 
@@ -34,7 +53,8 @@
 - `rag_design.md`：RAG 详细设计，包含父子 chunk 和图片资产召回。
 - `frontend_design.md`：Vue 前端设计，包含历史会话、流式输出、停止生成、编辑消息、引用来源和图片预览。
 - `learning_record.md`：当前学习记录。
-- `teaching_plan.md`：后续教学教案。
+- `docs/superpowers/plans/2026-06-01-agent-rag-learning-roadmap.md`：当前学习路线和实施规划。
+- `docs/notes/`：阶段性复习笔记。
 
 ## 3. 已明确的关键需求
 
@@ -88,14 +108,14 @@
 
 | 模块 | 当前状态 | 后续目标 |
 | --- | --- | --- |
-| FastAPI | 已完成 Phase 0 基础实践 | 继续掌握依赖注入、错误处理、业务路由拆分 |
-| PostgreSQL | 已完成容器检查、项目库创建和连接验证 | 能设计知识库、文档、chunk、会话、消息、任务表 |
-| Redis | 已完成容器检查和连接验证 | 能用于任务状态、停止生成、缓存和限流 |
-| LangChain | 待项目实践 | 能封装模型、prompt、retriever、tool |
+| FastAPI | 已完成健康检查、知识库 API、文档 API、Retrieval API | 继续实现 chat / streaming / stop generation 等更复杂接口 |
+| PostgreSQL | 已完成知识库、文档、资产、chunk、pgvector 字段和 Alembic 迁移实践 | 继续实现 vector search、会话、消息、任务表和索引优化 |
+| Redis | 已完成容器检查和连接验证 | 后续用于任务状态、停止生成、缓存和限流 |
+| LangChain | 已在 splitter 和 token counter 阶段开始项目实践 | 继续封装 embedding、retriever、LLM、prompt 和 tool 边界 |
 | LangGraph | 已有学习基础 | 能实现真实 Multi-Agent 工作流 |
-| RAG | 已明确设计方向 | 能实现普通 chunk、父子 chunk、图片召回 |
-| Vue | 待项目实践 | 能实现类大模型产品的聊天工作台 |
-| 工程化 | 已完成配置、依赖、测试、日志的基础实践 | 能用 Docker、测试、日志、配置完成可维护项目 |
+| RAG | 已完成 normal chunk、parent-child chunk、Retrieval API、Context Assembly、动态 token budget、Embedding Provider 和 pgvector 字段 | 继续完成 embedding 入库、pgvector 检索、hybrid retrieval、RRF、rerank 和图片资产召回 |
+| Vue | 已有前端工作台骨架和设计文档 | 后续实现真实聊天工作台、引用来源、图片预览、流式输出和 Agent trace 展示 |
+| 工程化 | 已完成配置、依赖、测试、日志、Alembic、docs 整理的基础实践 | 继续加强测试分层、可观测性、评测集、错误处理和生产部署说明 |
 
 ## 5. 学习方式
 
@@ -220,7 +240,7 @@
 - 创建 `rag_design.md`，补充普通 chunk、父子 chunk、图片资产召回设计。
 - 创建 `frontend_design.md`，明确 Vue 前端工作台设计。
 - 创建 `learning_record.md`，用于持续记录学习过程。
-- 创建 `teaching_plan.md`，用于约束后续教学节奏。
+- 创建早期教学教案；后续已由 `docs/superpowers/plans/2026-06-01-agent-rag-learning-roadmap.md` 取代。
 - 明确教学原则：没有明确要求代写代码时，AI 只教学和检查，不自动写代码。
 
 今天写了哪些文档：
@@ -229,7 +249,7 @@
 - `docs/rag_design.md`
 - `docs/frontend_design.md`
 - `docs/learning_record.md`
-- `docs/teaching_plan.md`
+- 早期教学教案，后续已清理合并到当前 roadmap。
 
 今天理解的关键概念：
 
@@ -694,7 +714,7 @@
 - 使用 `exclude_unset=True` 实现部分更新，避免未传字段被覆盖。
 - 理解知识库系统为什么优先使用软删除。
 - 补充知识库接口测试，覆盖创建、列表、详情、更新、删除、404 和非法 UUID。
-- 新增第一份学习笔记 `study_notes.md`，整理 FastAPI 工程骨架和知识库 CRUD。
+- 新增第一份学习笔记，整理 FastAPI 工程骨架和知识库 CRUD；后续整理到 `docs/notes/01-fastapi-knowledge-base.md`。
 
 今天写了哪些代码或文档：
 
@@ -702,7 +722,7 @@
 - `app/services/knowledge_base_service.py`
 - `app/api/routes/knowledge_bases.py`
 - `tests/test_knowledge_bases.py`
-- `docs/study_notes.md`
+- `docs/notes/01-fastapi-knowledge-base.md`
 
 今天理解的关键概念：
 
@@ -746,7 +766,7 @@
 - 实现 `DocumentCreate`、`DocumentRead`。
 - 实现 Document 创建、列表、按知识库过滤、详情接口。
 - 通过 curl 验证 Document 接口可用。
-- 创建第二份学习笔记 `study_notes2.md`，用于后续文档入库和 RAG 数据基础记录。
+- 创建第二份学习笔记，用于后续文档入库和 RAG 数据基础记录；后续整理到 `docs/notes/02-document-ingestion-assets.md`。
 
 今天写了哪些代码或文档：
 
@@ -758,7 +778,7 @@
 - `app/api/router.py`
 - `migrations/versions/32bfadf5771c_create_documents.py`
 - `migrations/versions/42abb46cdedc_add_document_file_hash_index.py`
-- `docs/study_notes2.md`
+- `docs/notes/02-document-ingestion-assets.md`
 
 今天理解的关键概念：
 
@@ -980,6 +1000,169 @@
 - 封装批量 indexing 脚本，处理所有已经 parsed 的文档。
 - 开始实现父子 chunk 切分与入库。
 
+### 日期：2026-06-02
+
+学习主题：
+
+- Retrieval API 边界稳定、Embedding Provider 抽象、pgvector 字段迁移和文档体系整理。
+
+今天完成：
+
+- 完成 `POST /api/retrieval` API 链路：
+  - `app/api/routes/retrieval.py`
+  - `app/services/retrieval_service.py`
+  - `app/schemas/retrieval.py`
+- 明确 Retrieval API 的分层：
+  - API route 只负责 HTTP、依赖注入和错误码。
+  - `retrieval_service.py` 作为应用服务，负责编排检索、上下文组装和响应转换。
+  - `document_retrieval_service.py` 负责底层检索、keyword hit、父子 chunk 回填和 trace。
+  - `context_assembly_service.py` 负责 token budget、上下文截断、citation 和 used/dropped candidates。
+- 修复 parent-child retrieval 的重复实现问题：
+  - 删除/合并重复的 parent backfill 函数。
+  - 保留 `get_parent_for_child()` 作为单条 child-parent 合法性校验。
+  - 保留 `retrieve_parent_contexts_best_effort()` 作为生产请求批量回填入口。
+  - 修复 `retrieve_context()` 中重复调用 `retrieve_parent_contexts_best_effort()` 的问题。
+- 修复 Retrieval API 和检索边界问题：
+  - `ValueError` 在 retrieval route 中返回 `400_BAD_REQUEST`，不再返回 404。
+  - `document_ids == []` 时直接返回空检索结果，避免空文档范围退化成全库检索。
+  - 删除 `retrieval_service.py` 中无意义的模块级变量注解。
+- 新增 Retrieval API 测试：
+  - `tests/test_retrieval_api.py`
+  - 测试 normal chunk 可通过 `POST /api/retrieval` 返回 context、citation 和 trace。
+  - 测试空 `knowledge_base_id` 范围不会泄露其他知识库的 chunk。
+- 验证 Retrieval API / retrieval / token budget 测试：
+  - `pytest tests/test_retrieval_api.py tests/test_document_retrieval.py tests/test_token_budget.py`
+  - 本地结果：`16 passed`。
+- 完成 Embedding Provider 抽象：
+  - 新增 `app/rag/embeddings.py`。
+  - 定义 `EmbeddingProvider` Protocol。
+  - 实现 `DeterministicEmbeddingProvider` 测试 provider。
+  - 新增 `tests/test_embeddings.py`。
+  - 验证固定维度、同文本同向量、不同文本不同向量、批量顺序、空文本拒绝。
+- 为 `document_chunks` 增加 pgvector 字段：
+  - `embedding`
+  - `embedding_dimensions`
+  - 保留已有 `embedding_model`。
+- 更新配置：
+  - `embedding_model = "deterministic-test-embedding"`
+  - `embedding_dimensions = 8`
+- 更新依赖：
+  - `pyproject.toml` 增加 `pgvector`。
+- 生成并执行 Alembic 迁移：
+  - `migrations/versions/1ed2530eec8c_add_document_chunk_embedding.py`
+  - 手动补充 `import pgvector.sqlalchemy`。
+  - 执行 `alembic upgrade head`。
+  - 使用 `docker exec postgres psql -U agent -d agent_workspace -c "\d document_chunks"` 验证数据库中已出现：
+    - `embedding vector(8)`
+    - `embedding_dimensions integer`
+- 整理 docs 文档体系：
+  - 新增 `docs/README.md`，作为文档索引。
+  - 删除过时的 `docs/teaching_plan.md`，当前学习路线以 roadmap 为准。
+  - 将 `study_notes.md` 移动为 `docs/notes/01-fastapi-knowledge-base.md`。
+  - 将 `study_notes2.md` 移动为 `docs/notes/02-document-ingestion-assets.md`。
+  - 新增详细复习笔记 `docs/notes/03-retrieval-api-embedding-pgvector.md`。
+  - 更新 `learning_record.md` 中的旧文档引用。
+
+今天写了哪些代码或文档：
+
+- `app/api/routes/retrieval.py`
+- `app/api/router.py`
+- `app/schemas/retrieval.py`
+- `app/services/retrieval_service.py`
+- `app/services/document_retrieval_service.py`
+- `app/rag/retrieval_types.py`
+- `app/rag/embeddings.py`
+- `app/core/config.py`
+- `app/models/document_chunk.py`
+- `tests/test_retrieval_api.py`
+- `tests/test_document_retrieval.py`
+- `tests/test_embeddings.py`
+- `tests/test_token_budget.py`
+- `pyproject.toml`
+- `migrations/versions/1ed2530eec8c_add_document_chunk_embedding.py`
+- `docs/README.md`
+- `docs/notes/01-fastapi-knowledge-base.md`
+- `docs/notes/02-document-ingestion-assets.md`
+- `docs/notes/03-retrieval-api-embedding-pgvector.md`
+- `docs/superpowers/plans/2026-06-01-agent-rag-learning-roadmap.md`
+
+今天理解的关键概念：
+
+- API 测试不是重复 service 测试，而是验证完整 HTTP 链路：route、Pydantic schema、dependency injection、service、response model。
+- Retrieval API 不应该直接暴露底层检索实现，而应该返回 `context_text`、`citations`、`budget_plan`、`trace` 等稳定结构。
+- `RetrievalSource` 和 `RetrievalMode` 要区分：
+  - `RetrievalSource` 表示 keyword、vector、bm25、hybrid、rerank 等检索来源。
+  - `RetrievalMode` 表示 normal / parent_child 这样的 chunk 结构。
+- parent-child 检索中，`context_chunk` 和 `citation_chunk` 可以不同：
+  - `context_chunk = parent`
+  - `citation_chunk = child`
+- 生产请求中遇到坏 child 不应该轻易 500，best-effort 回填可以跳过坏数据，并用 trace 记录 dropped 原因。
+- 空列表和 None 语义不同：
+  - `document_ids is None` 表示不限制文档范围。
+  - `document_ids == []` 表示限制范围为空，必须返回空结果。
+- 测试用 embedding provider 不追求语义效果，重点是 deterministic、稳定、无网络、无 API Key。
+- `Mapped[list[float] | None]` 只是 Python 类型注解，SQLAlchemy 不能自动推断成 pgvector 字段。
+- pgvector 字段必须显式使用 `mapped_column(Vector(...))`。
+- Alembic autogenerate 生成第三方类型 migration 后必须人工检查 import 和类型写法。
+- 文档体系需要区分：
+  - `development_plan.md`：项目纲领。
+  - `rag_design.md`：RAG 专项设计。
+  - `frontend_design.md`：前端专项设计。
+  - roadmap：当前学习路线。
+  - `learning_record.md`：学习流水账。
+  - `docs/notes/`：阶段性复习笔记。
+
+遇到的问题：
+
+- Retrieval backfill 曾经出现重复实现和重复调用，容易导致职责混乱。
+- Retrieval route 曾经把 `ValueError` 返回成 404，语义不准确。
+- `document_ids == []` 曾经会跳过 where 条件，有全库检索泄露风险。
+- 本地某些命令在 Codex 工具默认 Python 环境下缺少依赖，但在 `ai` conda 环境下可以正常运行。
+- `pgvector` 加入 `pyproject.toml` 后，还需要重新安装项目依赖，当前环境才能 import。
+- Alembic 生成 `pgvector.sqlalchemy.Vector(dim=8)` 后没有自动补 `import pgvector.sqlalchemy`。
+- 尝试直接执行 migration 文件路径时，zsh 返回 `permission denied`；正确做法是用 `cat` 或 `sed` 查看文件。
+
+解决方式：
+
+- 收敛 parent backfill 为单条校验函数 + best-effort 批量入口。
+- 在 `search_chunks_by_keyword()` 中显式处理 `document_ids == []`。
+- Retrieval route 中将 `ValueError` 映射为 `400_BAD_REQUEST`。
+- 增加 API 层测试覆盖 normal retrieval 和空知识库范围隔离。
+- 使用 `EmbeddingProvider` Protocol 隔离 embedding provider。
+- 使用 `DeterministicEmbeddingProvider` 作为测试 provider。
+- 在 `DocumentChunk.embedding` 中使用 `mapped_column(Vector(settings.embedding_dimensions))`。
+- 生成 migration 后手动检查并补充 `import pgvector.sqlalchemy`。
+- 用 `docker exec postgres psql ... "\d document_chunks"` 验证真实数据库结构。
+- 新增 `docs/README.md` 梳理文档职责，删除过时 `teaching_plan.md`，将复习笔记集中到 `docs/notes/`。
+
+当前验证结果：
+
+- `pytest tests/test_retrieval_api.py::test_retrieval_api_returns_context_for_normal_chunk -v`：通过。
+- `pytest tests/test_retrieval_api.py::test_retrieval_api_empty_knowledge_base_scope_does_not_leak_other_documents -v`：通过。
+- `pytest tests/test_retrieval_api.py tests/test_document_retrieval.py tests/test_token_budget.py`：`16 passed`。
+- `tests/test_embeddings.py`：用户本地反馈全部通过。
+- `python -m py_compile migrations/versions/1ed2530eec8c_add_document_chunk_embedding.py`：通过。
+- `alembic upgrade head`：通过。
+- `\d document_chunks`：确认 `embedding vector(8)` 和 `embedding_dimensions integer` 已存在。
+
+还不理解或后续需要继续深入的地方：
+
+- 如何在 indexing service 中批量生成 embedding 并写入 `document_chunks.embedding`。
+- 如何判断 chunk 是否需要重新 embedding。
+- pgvector 查询语法、距离函数、score 归一化和索引类型如何设计。
+- vector retrieval 如何与 keyword retrieval 并存，并为后续 hybrid / RRF 做准备。
+- embedding 维度未来从 8 切换到真实模型维度时，迁移策略如何设计。
+
+下次继续：
+
+- 从 `app/services/document_chunk_service.py` 和 `app/schemas/document_chunk.py` 开始，检查 `DocumentChunkCreate` 是否支持：
+  - `embedding`
+  - `embedding_model`
+  - `embedding_dimensions`
+- 修改 chunk 创建链路，让 indexing service 能写入 embedding。
+- 用 `DeterministicEmbeddingProvider` 先完成无外部依赖的 embedding 入库测试。
+- 之后再实现 `app/rag/vector_store.py` 和 `tests/test_vector_retrieval.py`，进入 pgvector vector search。
+
 ## 7. 里程碑记录
 
 ### Milestone 0：项目规划
@@ -1065,7 +1248,7 @@
 
 ### Milestone 3：RAG 入库
 
-状态：normal chunk 与父子 chunk 入库主链路已跑通
+状态：normal chunk、父子 chunk、Retrieval API、Embedding Provider 和 pgvector 字段基础已跑通
 
 目标：
 
@@ -1126,15 +1309,26 @@
 - 将检索入口生产化：加入 `top_k` 硬边界、稳定排序与 `rank`、父子 chunk best-effort 回填（坏数据不导致 500）、并在 `trace.dropped_hit_counts` 中记录 orphan child 数量，提升可观测性与线上可排障能力。
 - 新增 3 个检索入口测试用例覆盖 normal / parent-child / best-effort dropped trace；全量 `pytest -q` 结果为 24 passed。
 - 决定后续 Retrieval API 采用 `POST /api/retrieval`，并规划请求/响应 schema：返回 `context_text + citations + budget_plan + trace`，为后续接入向量检索与 rerank 预留演进空间。
+- 实现 `POST /api/retrieval`、`RetrievalRequest`、`RetrievalResponse` 和 `run_retrieval()` 应用服务。
+- 新增 Retrieval API 测试，覆盖 normal chunk API 召回和空知识库范围隔离。
+- 修复 `document_ids == []` 退化成全库检索的边界问题。
+- 抽象 `EmbeddingProvider`，实现 `DeterministicEmbeddingProvider` 用于稳定测试。
+- 新增 `tests/test_embeddings.py`，验证 embedding provider 的固定维度、稳定性、批量顺序和空文本拒绝。
+- 为 `document_chunks` 增加 `embedding vector(8)` 和 `embedding_dimensions integer` 字段。
+- 新增 `pgvector` Python 依赖，并完成 Alembic 迁移 `1ed2530eec8c_add_document_chunk_embedding.py`。
+- 执行 `alembic upgrade head` 并验证 PostgreSQL `document_chunks` 表结构。
+- 整理文档体系，新增 `docs/README.md` 和 `docs/notes/03-retrieval-api-embedding-pgvector.md`。
 
 待完成：
 
-- retrieval pipeline 分层设计：normal keyword context、parent-child keyword context、vector search、RRF、rerank、parent backfill、context assembly。
+- chunk 入库时生成并写入 embedding。
+- 实现 pgvector vector search。
+- retrieval pipeline 继续扩展：normal keyword context、parent-child keyword context、vector search、RRF、rerank、parent backfill、context assembly。
 - child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
 - 父子 chunk 批量 indexing 脚本或 indexing strategy 参数化。
 - docx 图片抽取与登记。
 - PDF 解析。
-- embedding 和 pgvector 入库。
+- embedding 重建策略和真实 embedding provider。
 
 ### Milestone 4：RAG 问答
 

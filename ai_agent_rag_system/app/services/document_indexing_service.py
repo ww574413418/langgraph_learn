@@ -7,6 +7,7 @@ from app.rag.loaders import load_document
 from app.rag.splitters import split_normal_chunks,split_parent_child_chunks
 from app.services.document_chunk_service import DocumentChunkCreate, get_existing_chunk
 from app.services.document_chunk_service import chunk_exist,create_document_chunk
+from app.rag.embeddings import EmbeddingProvider
 
 
 def calculate_content_hash(content: str) -> str:
@@ -16,15 +17,25 @@ def calculate_content_hash(content: str) -> str:
 def index_document_normal_chunks(
         db:Session,
         document:Document,
+        embedding_provider: EmbeddingProvider,
         chunk_size:int = 1000,
         chunk_overlap:int = 120
 ) -> None:
+    """
+        普通 chunk 索引。
+
+        关键变化：
+        - split 完之后批量生成 embedding
+        - chunk 入库时保存 embedding_model / embedding_dimensions / embedding
+        """
     try:
         document.status = "chunking"
+        document.error_message = None
         db.add(document)
         db.commit()
 
         parsed_document = load_document(Path(document.file_path))
+
 
         chunks = split_normal_chunks(
             parsed_document.text,
@@ -32,6 +43,11 @@ def index_document_normal_chunks(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
+
+        # 2. 先筛出真正需要新建的 chunk。
+        # 不要对已经存在的 chunk 重复调用 embedding API。
+        # 真实 embedding API 是付费且慢的，重复 embedding 是生产事故级浪费。
+        chunks_to_create = []
 
         for chunk in chunks:
             content_hash = calculate_content_hash(chunk.content)
@@ -41,6 +57,24 @@ def index_document_normal_chunks(
                 print(f"SKIP existing chunk:{chunk.chunk_index}")
                 continue
 
+            chunks_to_create.append((chunk, content_hash))
+
+        # 3. 只给新增 chunk 生成 embedding。
+        # 如果没有新增 chunk，也应该把文档标记为 indexed。
+        if chunks_to_create:
+            texts = [chunk.content for chunk, _content_hash in chunks_to_create]
+            embeddings = embedding_provider.embed_documents(texts)
+        else:
+            embeddings = []
+
+        if len(embeddings) != len(chunks_to_create):
+            raise RuntimeError("Embedding count does not match chunk count")
+
+        for (chunk, content_hash),embedding in zip(
+            chunks_to_create,
+            embeddings,
+            strict=True
+        ):
             create_document_chunk(
                 db,
                 data=DocumentChunkCreate(
@@ -54,7 +88,11 @@ def index_document_normal_chunks(
                     char_count=len(chunk.content),
                     start_char=chunk.start_char,
                     end_char=chunk.end_char,
-                    embedding_model=None,
+                    # embedding 相关字段必须和 chunk 一起落库。
+                    embedding_model=embedding_provider.model_name,
+                    embedding=embedding,
+                    embedding_dimensions=embedding_provider.dimensions,
+
                     extra_metadata={
                         **chunk.metadata,
                         "chunk_size":chunk_size,
@@ -63,11 +101,13 @@ def index_document_normal_chunks(
                 )
             )
 
-            document.status = "indexed"
-            document.error_message = None
-            db.add(document)
-            db.commit()
-            db.refresh( document)
+        # 5. 无论本次是新增了 chunk，还是全部 skip，
+        # 只要流程正常结束，文档都应该是 indexed。
+        document.status = "indexed"
+        document.error_message = None
+        db.add(document)
+        db.commit()
+        db.refresh(document)
     except Exception as exc:
         db.rollback()
         document.status = "failed"

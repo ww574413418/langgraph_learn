@@ -28,6 +28,29 @@ class Settings(BaseSettings):
     frontend_dist_dir: str = "frontend/dist" # Vue build 输出目录
     static_dir:str = "app/static" # 后端静态资源目录，后面可放上传文件、图片资产等
 
+    # ===== Chat model 配置 =====
+    # 后面 LangChain / LangGraph 调 LLM 时使用。
+    llm_api_key: str | None = None
+    llm_base_url: str | None = None
+    llm_chat_model: str | None = None
+
+    # ===== Embedding model 配置 =====
+    # RAG indexing / retrieval 使用。
+    embedding_api_key: str | None = None
+    embedding_base_url: str | None = None
+    embedding_model: str = "deterministic-test-embedding"
+
+    # 维度必须显式配置。
+    # 因为 pgvector 字段是固定维度，例如 vector(8) / vector(1024) / vector(1536)。
+    embedding_dimensions: int = 8
+
+    # 网络超时，避免第三方平台卡住导致索引任务无限等待。
+    embedding_timeout_seconds: float = 30.0
+
+    # 批量 embedding 的最大 batch size。
+    # 不同平台限制不同，建议通过配置控制。
+    embedding_batch_size: int = 64
+
 # 缓存配置对象，避免每次导入都重新读取 .env。
 @lru_cache
 def get_settings() -> Settings:

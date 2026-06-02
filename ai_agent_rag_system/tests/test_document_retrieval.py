@@ -3,7 +3,6 @@ from uuid import uuid4
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
-
 from app.core.config import settings
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
@@ -13,6 +12,8 @@ from app.services.document_retrieval_service import (
     search_chunks_by_keyword,
     retrieve_context_candidates
 )
+from app.rag.embeddings import DeterministicEmbeddingProvider
+from app.services.document_retrieval_service import retrieve_context
 
 def test_calculate_keyword_score_returns_zero_for_empty_query() -> None:
     assert calculate_keyword_score("hello world", "") == 0.0
@@ -74,11 +75,15 @@ def create_chunk(
     chunk_type: str,
     content: str,
     chunk_index: int,
+    parent_id=None,
+    embedding_model: str | None = None,
+    embedding: list[float] | None = None,
+    embedding_dimensions: int | None = None,
 ) -> DocumentChunk:
     chunk = DocumentChunk(
         id=uuid4(),
         document_id=document_id,
-        parent_id=None,
+        parent_id=parent_id,
         chunk_type=chunk_type,
         chunk_index=chunk_index,
         content=content,
@@ -87,8 +92,10 @@ def create_chunk(
         char_count=len(content),
         start_char=0,
         end_char=len(content),
-        embedding_model=None,
-        extra_metadata={},
+        embedding_model=embedding_model,
+        embedding=embedding,
+        embedding_dimensions=embedding_dimensions,
+        extra_metadata={"file_type": "txt"},
     )
 
     db.add(chunk)
@@ -318,6 +325,134 @@ def test_retrieve_context_parent_child_best_effort_tracks_orphan_children() -> N
 
         assert result.candidates == []
         assert result.trace.dropped_hit_counts.get("orphan_child") == 1
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_normal_mode_with_vector_strategy() -> None:
+    """
+    验证 retrieve_context 支持 normal + vector。
+
+    这个测试不是测 pgvector 底层查询。
+    pgvector 已经由 test_vector_retrieval.py 覆盖。
+
+    这里测的是：
+    - vector hit 能进入 retrieval pipeline
+    - normal mode 能把 hit 转成 ContextCandidate
+    - trace 能正确记录 source
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+    provider = DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
+
+    try:
+        target_text = "机器人无法充电时，需要检查充电底座和电源。"
+
+        target_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content=target_text,
+            chunk_index=0,
+            embedding_model=provider.model_name,
+            embedding=provider.embed_query(target_text),
+            embedding_dimensions=provider.dimensions,
+        )
+
+        result = retrieve_context(
+            db=db,
+            query=target_text,
+            document_ids=[document.id],
+            mode="normal",
+            strategy="vector",
+            embedding_provider=provider,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 1
+        assert result.candidates[0].citation_chunk.id == target_chunk.id
+        assert result.candidates[0].context_chunk.id == target_chunk.id
+        assert result.candidates[0].retrieval_mode == "normal"
+        assert result.candidates[0].retrieval_source == "vector"
+
+        assert result.trace.sources == ["vector"]
+        assert result.trace.total_hits == 1
+        assert result.trace.used_hits == 1
+        assert result.trace.source_hit_counts == {"vector": 1}
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_parent_child_mode_with_vector_strategy_backfills_parent() -> None:
+    """
+    验证 parent_child + vector。
+
+    这个测试覆盖的是完整 retrieval pipeline：
+    - vector 检索 child chunk
+    - 根据 child.parent_id 回填 parent chunk
+    - parent 作为 context_chunk
+    - child 作为 citation_chunk
+    - trace 正确记录 vector source
+
+    注意：
+    pgvector 底层查询已经由 test_vector_retrieval.py 覆盖。
+    这里测试的是“vector hit 如何进入父子 chunk 流程”。
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+    provider = DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
+
+    try:
+        parent = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="parent",
+            content="机器人充电故障排查完整说明：检查电源、底座、金属触点和摆放位置。",
+            chunk_index=0,
+        )
+
+        child_text = "机器人无法充电时，需要检查充电底座和电源。"
+
+        child = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content=child_text,
+            chunk_index=1,
+            parent_id=parent.id,
+            embedding_model=provider.model_name,
+            embedding=provider.embed_query(child_text),
+            embedding_dimensions=provider.dimensions,
+        )
+
+        result = retrieve_context(
+            db=db,
+            query=child_text,
+            document_ids=[document.id],
+            mode="parent_child",
+            strategy="vector",
+            embedding_provider=provider,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 1
+
+        candidate = result.candidates[0]
+
+        assert candidate.retrieval_mode == "parent_child"
+        assert candidate.retrieval_source == "vector"
+
+        # 父子 chunk 的核心语义：
+        # context 用 parent，citation 用 child。
+        assert candidate.context_chunk.id == parent.id
+        assert candidate.citation_chunk.id == child.id
+
+        assert result.trace.sources == ["vector"]
+        assert result.trace.total_hits == 1
+        assert result.trace.used_hits == 1
+        assert result.trace.source_hit_counts == {"vector": 1}
+        assert result.trace.dropped_hit_counts == {}
     finally:
         cleanup_test_document(db, document)
         db.close()
