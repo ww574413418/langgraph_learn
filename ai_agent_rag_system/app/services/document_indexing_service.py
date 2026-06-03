@@ -120,16 +120,20 @@ def index_document_normal_chunks(
 def index_document_parent_child_chunks(
         db:Session,
         document:Document,
-        parent_chunk_size:int = 1800,
-        parent_chunk_overlap:int = 120,
-        child_chunk_size:int = 400,
-        child_chunk_overlap:int = 80
+        embedding_provider: EmbeddingProvider,
+        parent_chunk_size: int = 1800,
+        parent_chunk_overlap: int = 120,
+        child_chunk_size: int = 400,
+        child_chunk_overlap: int = 80,
 )->None:
     try:
         # 先更新文档的状态
         document.status = "chunking"
         db.add(document)
         db.commit()
+
+        children_to_create = []
+
         # 拿到处理过的文本
         parsed_document = load_document(Path(document.file_path))
         # 进行父子切片
@@ -202,31 +206,54 @@ def index_document_parent_child_chunks(
                     print(f"SKIP existing child chunk:{parent.chunk_index}.{child.chunk_index}")
                     continue
 
-                # 将 child chunk保存到数据库
-                child_chunk = create_document_chunk(
-                    db,
-                    data=DocumentChunkCreate(
-                        document_id=document.id,
-                        parent_id=parent_chunk.id,
-                        chunk_type="child",
-                        chunk_index=child.chunk_index,
-                        content=child.content,
-                        content_hash=child_content_hash,
-                        token_count=len(child.content),
-                        char_count=len(child.content),
-                        start_char=child.start_char,
-                        end_char=child.end_char,
-                        embedding_model=None,
-                        extra_metadata={
-                            **child.metadata,
-                            "parent_chunk_index": parent.chunk_index,
-                            "parent_chunk_size": parent_chunk_size,
-                            "parent_chunk_overlap": parent_chunk_overlap,
-                            "child_chunk_size": child_chunk_size,
-                            "child_chunk_overlap": child_chunk_overlap,
-                        }
-                    )
+                children_to_create.append(
+                    (parent_chunk, parent, child, child_content_hash)
                 )
+
+        if children_to_create:
+            child_texts = [
+                child.content
+                for _parent_chunk, _parent, child, _child_content_hash in children_to_create
+            ]
+            child_embeddings = embedding_provider.embed_documents(child_texts)
+        else:
+            child_embeddings = []
+
+        if len(child_embeddings) != len(children_to_create):
+            raise RuntimeError("Embedding count does not match child chunk count")
+
+        for (
+            parent_chunk,
+            parent,
+            child,
+            child_content_hash,
+        ), child_embedding in zip(children_to_create, child_embeddings, strict=True):
+            create_document_chunk(
+                db,
+                data=DocumentChunkCreate(
+                    document_id=document.id,
+                    parent_id=parent_chunk.id,
+                    chunk_type="child",
+                    chunk_index=child.chunk_index,
+                    content=child.content,
+                    content_hash=child_content_hash,
+                    token_count=len(child.content),
+                    char_count=len(child.content),
+                    start_char=child.start_char,
+                    end_char=child.end_char,
+                    embedding_model=embedding_provider.model_name,
+                    embedding=child_embedding,
+                    embedding_dimensions=embedding_provider.dimensions,
+                    extra_metadata={
+                        **child.metadata,
+                        "parent_chunk_index": parent.chunk_index,
+                        "parent_chunk_size": parent_chunk_size,
+                        "parent_chunk_overlap": parent_chunk_overlap,
+                        "child_chunk_size": child_chunk_size,
+                        "child_chunk_overlap": child_chunk_overlap,
+                    }
+                )
+            )
 
         # 更新文档状态
         document.status = "indexed"

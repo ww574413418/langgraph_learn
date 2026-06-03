@@ -86,7 +86,7 @@ redis://localhost:6379/0
 
 配置模板放在 `.env.example`，应该提交到 Git。
 
-常用配置：
+本地开发配置模板是 `.env.example`，默认连接本地 PostgreSQL 和 Redis：
 
 ```env
 APP_NAME="AI Agent Knowledge Workspace"
@@ -103,6 +103,24 @@ LOG_FILE_PATH="logs/app.log"
 LOG_MAX_BYTES=10485760
 LOG_BACKUP_COUNT=5
 ```
+
+Supabase 部署配置模板是 `.env.supabase.example`。部署到 Railway、Render 等平台时，不需要把这个文件复制到服务器；在平台的环境变量里设置同名变量即可：
+
+```env
+ENVIRONMENT="production"
+DEBUG=false
+DATABASE_URL="postgresql+psycopg://postgres.<PROJECT_REF>:<PASSWORD>@aws-0-<REGION>.pooler.supabase.com:5432/postgres"
+REDIS_URL="<cloud redis url>"
+EMBEDDING_DIMENSIONS=1024
+```
+
+切换规则：
+
+- 本地运行：使用 `.env` 中的本地 `DATABASE_URL`。
+- 云端部署：在部署平台设置 `DATABASE_URL` 为 Supabase 连接串。
+- 本地临时测试 Supabase：把 `.env` 的 `DATABASE_URL` 临时改成 Supabase 连接串。
+
+不要把真实 Supabase 密码、Redis 密码或 API key 提交到 Git。
 
 ## 后端启动
 

@@ -2,7 +2,7 @@
 
 记录日期：2026-04-30
 
-最近同步：2026-06-02
+最近同步：2026-06-03
 
 学习项目：`AI Agent Knowledge Workspace`
 
@@ -12,19 +12,19 @@
 
 最新进度摘要：
 
-- 当前已经完成知识库、文档登记、文档解析入口、Markdown 图片资产、normal chunk、parent-child chunk、Context Assembly、动态 token budget、Retrieval API、Embedding Provider 抽象和 pgvector 字段迁移。
+- 当前已经完成知识库、文档登记、文档解析入口、Markdown 图片资产、normal chunk、parent-child chunk、Context Assembly、动态 token budget、Retrieval API、Embedding Provider 抽象、pgvector 1024 维迁移和真实 embedding 模型接入。
 - `POST /api/retrieval` 链路已经接通，能从 API 层返回 `context_text`、`citations`、`budget_plan` 和 `trace`。
 - parent-child retrieval 已完成重复实现清理，当前保留单条 parent 校验和 best-effort 批量回填两类入口。
 - 已修复 `document_ids == []` 退化成全库检索的边界问题，避免空知识库范围泄露其他文档。
-- 已实现 `DeterministicEmbeddingProvider`，用于无网络、无 API Key、稳定可复现的 embedding 测试。
-- `document_chunks` 表已经增加 `embedding vector(8)` 和 `embedding_dimensions integer` 字段，Alembic 迁移已执行到 head。
+- 已实现 `DeterministicEmbeddingProvider` 用于无网络稳定测试，并接入 `OpenAICompatibleEmbeddingProvider` 用于真实第三方 embedding API。
+- `document_chunks.embedding` 已升级为 `vector(1024)`，并通过真实模型验证 child chunk embedding 写入和 parent-child vector retrieval。
 - 文档体系已经整理完成：长期设计看 `development_plan.md` / `rag_design.md` / `frontend_design.md`，学习路线看 roadmap，复习看 `docs/notes/`，流水账看本文件。
 
 当前最重要的下一步：
 
-- 让 chunk 入库时生成并写入 embedding。
-- 实现 pgvector vector search。
-- 再把 keyword retrieval 和 vector retrieval 组合成 hybrid retrieval，为 RRF 和 rerank 做准备。
+- 为历史旧 chunk 增加 re-embedding 脚本，补写真实 1024 维 embedding。
+- 把 keyword retrieval 和 vector retrieval 组合成 hybrid retrieval。
+- 学习并实现 RRF，为后续 rerank 做准备。
 
 你已经完成或正在形成的基础：
 
@@ -109,11 +109,11 @@
 | 模块 | 当前状态 | 后续目标 |
 | --- | --- | --- |
 | FastAPI | 已完成健康检查、知识库 API、文档 API、Retrieval API | 继续实现 chat / streaming / stop generation 等更复杂接口 |
-| PostgreSQL | 已完成知识库、文档、资产、chunk、pgvector 字段和 Alembic 迁移实践 | 继续实现 vector search、会话、消息、任务表和索引优化 |
+| PostgreSQL | 已完成知识库、文档、资产、chunk、pgvector 1024 维字段和 Alembic 迁移实践 | 继续实现向量索引优化、会话、消息、任务表和生产部署策略 |
 | Redis | 已完成容器检查和连接验证 | 后续用于任务状态、停止生成、缓存和限流 |
 | LangChain | 已在 splitter 和 token counter 阶段开始项目实践 | 继续封装 embedding、retriever、LLM、prompt 和 tool 边界 |
 | LangGraph | 已有学习基础 | 能实现真实 Multi-Agent 工作流 |
-| RAG | 已完成 normal chunk、parent-child chunk、Retrieval API、Context Assembly、动态 token budget、Embedding Provider 和 pgvector 字段 | 继续完成 embedding 入库、pgvector 检索、hybrid retrieval、RRF、rerank 和图片资产召回 |
+| RAG | 已完成 normal chunk、parent-child chunk、Retrieval API、Context Assembly、动态 token budget、真实 Embedding Provider、pgvector 入库和 parent-child vector retrieval | 继续完成 re-embedding、hybrid retrieval、RRF、rerank 和图片资产召回 |
 | Vue | 已有前端工作台骨架和设计文档 | 后续实现真实聊天工作台、引用来源、图片预览、流式输出和 Agent trace 展示 |
 | 工程化 | 已完成配置、依赖、测试、日志、Alembic、docs 整理的基础实践 | 继续加强测试分层、可观测性、评测集、错误处理和生产部署说明 |
 
@@ -1273,6 +1273,8 @@
 - 创建 `document_assets` 表。
 - 实现 Markdown 图片复制、URL 生成和资产入库。
 - 实现解析脚本并更新文档状态。
+- 增强解析脚本 `scripts/parse_registered_documents.py`：支持 `--document-id` 精准解析指定 uploaded 文档，并保持原有 `--limit` 批量解析行为。
+- 新增 `tests/test_parse_registered_documents_script.py`，验证指定文档 `uploaded -> parsed`，且未指定 uploaded 文档不会被误处理。
 - 创建 `document_chunks` 表。
 - 实现普通 chunk 的 ORM、schema 和 service。
 - 基于 LangChain splitter 封装 normal chunk 切分。
@@ -1318,17 +1320,23 @@
 - 新增 `pgvector` Python 依赖，并完成 Alembic 迁移 `1ed2530eec8c_add_document_chunk_embedding.py`。
 - 执行 `alembic upgrade head` 并验证 PostgreSQL `document_chunks` 表结构。
 - 整理文档体系，新增 `docs/README.md` 和 `docs/notes/03-retrieval-api-embedding-pgvector.md`。
+- 将 pgvector 字段从测试用 `vector(8)` 升级为生产固定维度 `vector(1024)`，新增迁移 `9b3c2a7f4d11_change_document_chunk_embedding_to_1024.py`，并清空旧 8 维 embedding 以避免不同向量空间混用。
+- 接入 OpenAI-compatible embedding provider，支持第三方平台兼容 OpenAI embeddings API；请求时显式传入 `dimensions=settings.embedding_dimensions`，当前真实模型验证为 `Qwen/Qwen3-Embedding-8B` 输出 1024 维。
+- normal chunk indexing 已支持批量生成并写入 embedding，新增 chunk 会保存 `embedding_model`、`embedding_dimensions` 和 `embedding`。
+- parent-child indexing 已支持 child chunk 批量生成并写入 embedding；parent chunk 作为上下文单元不写 embedding，child chunk 作为召回单元写入 embedding。
+- 新增 `scripts/index_parent_child_documents.py`，支持批量处理 parsed 文档，也支持 `--document-id` 精准处理指定文档。
+- 新增 `tests/test_parent_child_indexing_script.py`，验证脚本能将指定 parsed 文档索引为 parent-child chunk，并把 embedding 写入 child。
+- 使用真实模型完成父子 chunk 端到端验证：`uploaded -> parsed -> indexed`，目标文档生成 8 个 parent chunk 和 30 个 child chunk，child 均写入 `Qwen/Qwen3-Embedding-8B / 1024` embedding。
+- 使用真实 `parent_child + vector` 检索验证：query embedding 命中 child，retrieval pipeline 回填 parent，返回 `context_chunk_type = parent` 和 `citation_chunk_type = child`。
 
 待完成：
 
-- chunk 入库时生成并写入 embedding。
-- 实现 pgvector vector search。
-- retrieval pipeline 继续扩展：normal keyword context、parent-child keyword context、vector search、RRF、rerank、parent backfill、context assembly。
+- 已有旧 chunk 的 re-embedding 脚本：为历史 normal / child chunk 补写真实 1024 维 embedding。
+- retrieval pipeline 继续扩展：hybrid retrieval、RRF、rerank、query rewrite、context assembly 与 Retrieval API 的生产化整合。
 - child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
-- 父子 chunk 批量 indexing 脚本或 indexing strategy 参数化。
 - docx 图片抽取与登记。
 - PDF 解析。
-- embedding 重建策略和真实 embedding provider。
+- embedding 重建策略、模型版本化和向量索引策略。
 
 ### Milestone 4：RAG 问答
 

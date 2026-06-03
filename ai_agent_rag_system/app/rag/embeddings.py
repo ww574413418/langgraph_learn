@@ -172,6 +172,9 @@ class OpenAICompatibleEmbeddingProvider:
             response = self.client.embeddings.create(
                 model=self.model_name,
                 input=batch,
+                # 对支持 OpenAI dimensions 参数的 embedding 模型，显式要求输出项目配置维度。
+                # 例如模型原生返回 4096 维，但数据库固定为 vector(1024)，这里会请求 1024 维输出。
+                dimensions=self.dimensions,
             )
 
             batch_embeddings = [item.embedding for item in response.data]

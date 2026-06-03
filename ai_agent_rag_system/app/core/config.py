@@ -41,8 +41,9 @@ class Settings(BaseSettings):
     embedding_model: str = "deterministic-test-embedding"
 
     # 维度必须显式配置。
-    # 因为 pgvector 字段是固定维度，例如 vector(8) / vector(1024) / vector(1536)。
-    embedding_dimensions: int = 8
+    # 当前项目固定为 1024 维，因为 pgvector 字段会迁移为 vector(1024)。
+    # 如果未来更换为 1536 / 3072 维模型，必须同步做数据库迁移并重新生成 embedding。
+    embedding_dimensions: int = 1024
 
     # 网络超时，避免第三方平台卡住导致索引任务无限等待。
     embedding_timeout_seconds: float = 30.0
