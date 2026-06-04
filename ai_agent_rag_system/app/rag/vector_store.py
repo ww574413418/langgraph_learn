@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.document_chunk import DocumentChunk
-from app.rag.retrieval_types import ChunkHit
+from app.models.retrieval_types import ChunkHit
 
 
 def cosine_distance_to_score(distance: float) -> float:

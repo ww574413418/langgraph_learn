@@ -1,19 +1,17 @@
-from uuid import uuid4
-
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_base import KnowledgeBase
+from app.models.retrieval_types import ChunkHit
 from app.services.document_retrieval_service import (
     calculate_keyword_score,
     search_chunks_by_keyword,
-    retrieve_context_candidates
 )
 from app.rag.embeddings import DeterministicEmbeddingProvider
-from app.services.document_retrieval_service import retrieve_context
+
+
 
 def test_calculate_keyword_score_returns_zero_for_empty_query() -> None:
     assert calculate_keyword_score("hello world", "") == 0.0
@@ -228,7 +226,7 @@ def test_retrieve_context_candidates_normal_mode_adds_rank() -> None:
     document = create_test_document(db)
 
     try:
-        create_chunk(
+        matched = create_chunk(
             db,
             document_id=document.id,
             chunk_type="normal",
@@ -236,11 +234,25 @@ def test_retrieve_context_candidates_normal_mode_adds_rank() -> None:
             chunk_index=0,
         )
 
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=matched,
+                    score=8.0,
+                    raw_score=8.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
         items = retrieve_context_candidates(
             db=db,
             query="retrieval",
             document_ids=[document.id],
             mode="normal",
+            strategy="bm25",
+            lexical_retriever=retriever,
             top_k=5,
         )
 
@@ -248,6 +260,9 @@ def test_retrieve_context_candidates_normal_mode_adds_rank() -> None:
         assert items[0].retrieval_mode == "normal"
         assert items[0].context_chunk.id == items[0].citation_chunk.id
         assert items[0].rank == 1
+        assert items[0].retrieval_source == "bm25"
+        assert retriever.calls[0]["chunk_type"] == "normal"
+
     finally:
         cleanup_test_document(db, document)
         db.close()
@@ -275,19 +290,28 @@ def test_retrieve_context_candidates_parent_child_backfills_parent() -> None:
             chunk_type="child",
             content="Child mentions retrieval keyword.",
             chunk_index=1,
+            parent_id=parent.id,
         )
 
-        db.query(DocumentChunk).filter(DocumentChunk.id == child.id).update(
-            {"parent_id": parent.id}
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=child,
+                    score=9.0,
+                    raw_score=9.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
         )
-        db.commit()
-        db.refresh(child)
 
         items = retrieve_context_candidates(
             db=db,
             query="retrieval",
             document_ids=[document.id],
             mode="parent_child",
+            strategy="bm25",
+            lexical_retriever=retriever,
             top_k=5,
         )
 
@@ -296,6 +320,9 @@ def test_retrieve_context_candidates_parent_child_backfills_parent() -> None:
         assert items[0].context_chunk.id == parent.id
         assert items[0].citation_chunk.id == child.id
         assert items[0].rank == 1
+        assert items[0].retrieval_source == "bm25"
+        assert retriever.calls[0]["chunk_type"] == "child"
+
     finally:
         cleanup_test_document(db, document)
         db.close()
@@ -307,7 +334,7 @@ def test_retrieve_context_parent_child_best_effort_tracks_orphan_children() -> N
     document = create_test_document(db)
 
     try:
-        create_chunk(
+        orphan_child = create_chunk(
             db,
             document_id=document.id,
             chunk_type="child",
@@ -315,16 +342,34 @@ def test_retrieve_context_parent_child_best_effort_tracks_orphan_children() -> N
             chunk_index=0,
         )
 
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=orphan_child,
+                    score=7.0,
+                    raw_score=7.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
         result = retrieve_context(
             db=db,
             query="retrieval",
             document_ids=[document.id],
             mode="parent_child",
+            strategy="bm25",
+            lexical_retriever=retriever,
             top_k=5,
         )
 
         assert result.candidates == []
+        assert result.trace.sources == ["bm25"]
+        assert result.trace.source_hit_counts == {"bm25": 1}
         assert result.trace.dropped_hit_counts.get("orphan_child") == 1
+        assert retriever.calls[0]["chunk_type"] == "child"
+
     finally:
         cleanup_test_document(db, document)
         db.close()
@@ -455,4 +500,176 @@ def test_retrieve_context_parent_child_mode_with_vector_strategy_backfills_paren
         assert result.trace.dropped_hit_counts == {}
     finally:
         cleanup_test_document(db, document)
+        db.close()
+
+class FakeLexicalRetriever:
+    """
+    用 fake retriever 测 retrieval pipeline。
+
+    这里不测试 OpenSearch query body；那个由 test_lexical_store.py 覆盖。
+    这里测试的是：
+    - retrieve_context 是否调用了 lexical_retriever
+    - normal 模式是否检索 normal chunk
+    - parent_child 模式是否检索 child chunk
+    - BM25 hits 是否能进入 candidate normalization / parent backfill
+    """
+
+    def __init__(self, hits):
+        self.hits = hits
+        self.calls = []
+
+    def search(
+        self,
+        db,
+        *,
+        query,
+        chunk_type,
+        document_ids,
+        top_k,
+    ):
+        self.calls.append(
+            {
+                "query": query,
+                "chunk_type": chunk_type,
+                "document_ids": document_ids,
+                "top_k": top_k,
+            }
+        )
+        return self.hits
+
+
+def test_retrieve_context_normal_mode_with_bm25_strategy() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="机器人无法充电时，需要检查充电底座。",
+            chunk_index=0,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=chunk,
+                    score=12.5,
+                    raw_score=12.5,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="机器人 充电",
+            document_ids=[document.id],
+            mode="normal",
+            strategy="bm25",
+            lexical_retriever=retriever,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 1
+        assert result.candidates[0].context_chunk.id == chunk.id
+        assert result.candidates[0].citation_chunk.id == chunk.id
+        assert result.candidates[0].retrieval_mode == "normal"
+        assert result.candidates[0].retrieval_source == "bm25"
+        assert result.candidates[0].rank == 1
+
+        assert result.trace.sources == ["bm25"]
+        assert result.trace.total_hits == 1
+        assert result.trace.used_hits == 1
+        assert result.trace.source_hit_counts == {"bm25": 1}
+
+        assert retriever.calls[0]["chunk_type"] == "normal"
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_parent_child_mode_with_bm25_strategy_backfills_parent() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        parent = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="parent",
+            content="机器人充电故障排查完整说明。",
+            chunk_index=0,
+        )
+
+        child = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content="机器人无法充电，需要检查充电底座。",
+            chunk_index=1,
+            parent_id=parent.id,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=child,
+                    score=10.0,
+                    raw_score=10.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="机器人 充电",
+            document_ids=[document.id],
+            mode="parent_child",
+            strategy="bm25",
+            lexical_retriever=retriever,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 1
+
+        candidate = result.candidates[0]
+        assert candidate.context_chunk.id == parent.id
+        assert candidate.citation_chunk.id == child.id
+        assert candidate.retrieval_mode == "parent_child"
+        assert candidate.retrieval_source == "bm25"
+        assert candidate.rank == 1
+
+        assert result.trace.sources == ["bm25"]
+        assert result.trace.source_hit_counts == {"bm25": 1}
+        assert result.trace.dropped_hit_counts == {}
+
+        assert retriever.calls[0]["chunk_type"] == "child"
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_bm25_strategy_requires_lexical_retriever() -> None:
+    db = create_test_session()
+
+    try:
+        try:
+            retrieve_context(
+                db=db,
+                query="机器人",
+                mode="normal",
+                strategy="bm25",
+                lexical_retriever=None,
+            )
+        except ValueError as exc:
+            assert "lexical_retriever is required" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError")
+
+    finally:
         db.close()

@@ -2,7 +2,7 @@
 
 记录日期：2026-04-30
 
-最近同步：2026-06-03
+最近同步：2026-06-04
 
 学习项目：`AI Agent Knowledge Workspace`
 
@@ -12,8 +12,10 @@
 
 最新进度摘要：
 
-- 当前已经完成知识库、文档登记、文档解析入口、Markdown 图片资产、normal chunk、parent-child chunk、Context Assembly、动态 token budget、Retrieval API、Embedding Provider 抽象、pgvector 1024 维迁移和真实 embedding 模型接入。
+- 当前已经完成知识库、文档登记、文档解析入口、Markdown 图片资产、normal chunk、parent-child chunk、Context Assembly、动态 token budget、Retrieval API、Embedding Provider 抽象、pgvector 1024 维迁移、真实 embedding 模型接入和 BM25 lexical retrieval 接入。
 - `POST /api/retrieval` 链路已经接通，能从 API 层返回 `context_text`、`citations`、`budget_plan` 和 `trace`。
+- 旧 SQL `LIKE` keyword retrieval 已明确降级为 legacy 测试链路；生产级 keyword retrieval 方向改为 OpenSearch / Elasticsearch BM25 lexical retrieval。
+- 已实现 `search_chunks_by_bm25()`、`LexicalRetriever` / `OpenSearchBM25Retriever` 抽象，并把 `retrieve_context(strategy="bm25")` 接入 normal 和 parent-child retrieval pipeline。
 - parent-child retrieval 已完成重复实现清理，当前保留单条 parent 校验和 best-effort 批量回填两类入口。
 - 已修复 `document_ids == []` 退化成全库检索的边界问题，避免空知识库范围泄露其他文档。
 - 已实现 `DeterministicEmbeddingProvider` 用于无网络稳定测试，并接入 `OpenAICompatibleEmbeddingProvider` 用于真实第三方 embedding API。
@@ -22,9 +24,9 @@
 
 当前最重要的下一步：
 
-- 为历史旧 chunk 增加 re-embedding 脚本，补写真实 1024 维 embedding。
-- 把 keyword retrieval 和 vector retrieval 组合成 hybrid retrieval。
-- 学习并实现 RRF，为后续 rerank 做准备。
+- 进入 hybrid retrieval：BM25 lexical retrieval + pgvector semantic retrieval 双路召回。
+- 学习并实现 RRF，把 BM25 和 vector 的候选按 rank 融合，而不是直接比较原始分数。
+- 在 RRF candidate pool 稳定后，再进入 rerank。
 
 你已经完成或正在形成的基础：
 
@@ -113,7 +115,7 @@
 | Redis | 已完成容器检查和连接验证 | 后续用于任务状态、停止生成、缓存和限流 |
 | LangChain | 已在 splitter 和 token counter 阶段开始项目实践 | 继续封装 embedding、retriever、LLM、prompt 和 tool 边界 |
 | LangGraph | 已有学习基础 | 能实现真实 Multi-Agent 工作流 |
-| RAG | 已完成 normal chunk、parent-child chunk、Retrieval API、Context Assembly、动态 token budget、真实 Embedding Provider、pgvector 入库和 parent-child vector retrieval | 继续完成 re-embedding、hybrid retrieval、RRF、rerank 和图片资产召回 |
+| RAG | 已完成 normal chunk、parent-child chunk、Retrieval API、Context Assembly、动态 token budget、真实 Embedding Provider、pgvector 入库、parent-child vector retrieval 和 BM25 lexical retrieval | 继续完成 hybrid retrieval、RRF、rerank、query rewrite 和图片资产召回 |
 | Vue | 已有前端工作台骨架和设计文档 | 后续实现真实聊天工作台、引用来源、图片预览、流式输出和 Agent trace 展示 |
 | 工程化 | 已完成配置、依赖、测试、日志、Alembic、docs 整理的基础实践 | 继续加强测试分层、可观测性、评测集、错误处理和生产部署说明 |
 
@@ -225,6 +227,80 @@
 - 学习 `.env` 和 `.env.example` 的区别。
 - 创建本地配置模板。
 - 检查 `.gitignore` 是否正确忽略本地敏感配置。
+
+### 日期：2026-06-04
+
+学习主题：
+
+- 从 legacy SQL `LIKE` keyword retrieval 迁移到生产级 BM25 lexical retrieval。
+
+今天完成：
+
+- 明确旧 `search_chunks_by_keyword()` / `calculate_keyword_score()` 只是早期验证 retrieval pipeline 的 legacy 实现，不再作为生产级 keyword retrieval 方向。
+- 明确中文知识库的最佳 lexical retrieval 方向不是 SQL `LIKE`，而是 OpenSearch / Elasticsearch BM25，并结合中文 analyzer、字段权重和文档范围过滤。
+- 创建并验证 BM25 底层检索函数 `search_chunks_by_bm25()`：由 OpenSearch 负责召回和 BM25 排序，再根据返回的 `chunk_id` 回数据库读取真实 `DocumentChunk`。
+- 创建 `LexicalRetriever` 协议和 `OpenSearchBM25Retriever` 包装层，让 retrieval service 依赖抽象检索器，而不是直接依赖 OpenSearch client 和 index name。
+- 将 `RetrievalStrategy` 调整为 `"bm25" | "vector" | "hybrid"`，用真实检索实现名称记录 trace，避免继续用模糊的 `"keyword"`。
+- 将 `retrieve_context(strategy="bm25")` 接入 BM25：
+  - normal 模式检索 `chunk_type="normal"`。
+  - parent-child 模式先检索 `chunk_type="child"`，再复用已有 parent backfill。
+- 保留旧 SQL `LIKE` 相关函数和测试作为 legacy 覆盖，但新的 retrieval pipeline 不再通过 `strategy="bm25"` 调用它。
+
+今天写了哪些代码：
+
+- `app/models/lexical_types.py`：定义 `LexicalChunkDocument`，表示同步到搜索引擎的 chunk 文档结构。
+- `app/rag/lexical_index.py`：定义 OpenSearch chunk index mapping 和中文 analyzer 配置。
+- `app/rag/lexical_store.py`：实现 `search_chunks_by_bm25()`，处理 OpenSearch query、`document_ids` 空范围保护、`chunk_type` 过滤、OpenSearch hit 到 `ChunkHit` 的转换。
+- `app/rag/lexical_retriever.py`：定义 `LexicalRetriever` 协议和 `OpenSearchBM25Retriever`。
+- `app/services/document_retrieval_service.py`：把 `strategy="bm25"` 的 normal / parent-child 分支改为调用 `lexical_retriever.search()`。
+- `tests/test_lexical_store.py`：使用 fake OpenSearch 测试 BM25 store，不依赖真实搜索引擎。
+- `tests/test_document_retrieval.py`：使用 `FakeLexicalRetriever` 测试 BM25 hit 如何进入 retrieval pipeline。
+
+今天理解的关键概念：
+
+- BM25 和 vector 的原始分数不能直接比较；BM25 分数来自 lexical matching，vector 分数来自语义距离，后续必须通过 RRF 或 rerank 融合。
+- retrieval service 的职责是编排 normal / parent-child / trace，不应该知道 OpenSearch query body。
+- OpenSearch 是搜索索引，不是 source of truth；最终进入上下文的 chunk 应该回 Postgres 读取真实 `DocumentChunk`。
+- `document_ids == []` 是明确的空文档范围，必须直接返回空，不能省略过滤条件，否则会误查全库。
+- parent-child retrieval 的召回单元是 child，context 单元是 parent，citation 保留命中的 child。
+- 测试要分层：
+  - `test_lexical_store.py` 测 OpenSearch 查询体和 hit 转换。
+  - `test_document_retrieval.py` 测 `ChunkHit` 如何进入 retrieval pipeline。
+- 生产代码里不应该用 `assert lexical_retriever is not None` 做依赖校验；前置 `ValueError` 校验更稳定，因为 `assert` 可能在优化模式下被移除。
+
+遇到的问题：
+
+- import 路径一度混用 `models.retrieval_types`、`app.rag.retrieval_types` 和 `app.models.retrieval_types`，导致 pytest collection 报 `ModuleNotFoundError`。
+- `retrieve_context(strategy="bm25")` 初次修改后仍然调用旧 `search_chunks_by_keyword()`，导致：
+  - `retrieval_source` 仍然是 `"keyword"`。
+  - `FakeLexicalRetriever.calls` 为空。
+  - 中文 query `"机器人 充电"` 返回 0 个候选。
+- 讨论中明确：如果测试失败原因是“没有调用 lexical retriever”，修复重点不是新增 `_require_lexical_retriever()`，而是让 BM25 分支真正调用 `lexical_retriever.search()`。
+- 在 Codex sandbox 中直接跑 pytest 会因为无法连接 `localhost:5432` 失败；使用有权限环境或本地终端运行更可靠。
+
+解决方式：
+
+- 统一 retrieval types import 到 `app.models.retrieval_types`。
+- 在 `retrieve_context()` 前置校验 `strategy == "bm25" and lexical_retriever is None`。
+- normal BM25 分支改为：
+  - `lexical_retriever.search(..., chunk_type="normal", ...)`
+- parent-child BM25 分支改为：
+  - `lexical_retriever.search(..., chunk_type="child", ...)`
+- 保持 vector 分支走 `search_normal_chunks_by_vector()` / `search_child_chunks_by_vector()`，避免 BM25 改造误伤 vector retrieval。
+- 通过直接执行 BM25 retrieval regression tests 验证修复：`direct bm25 retrieval tests passed`。
+
+还不理解的地方：
+
+- OpenSearch 中文 analyzer 的最佳选择仍需结合部署环境确认：内置 CJK、ICU analyzer、IK / jieba 插件和业务词典各有取舍。
+- 后续需要继续理解 BM25 字段权重、分词粒度、同义词、短 query / 长 query 行为差异。
+- 后续需要继续理解 RRF 为什么只看 rank，以及它如何解决 BM25 score 与 vector score 分布不一致的问题。
+
+下次继续：
+
+- 进入 hybrid retrieval。
+- 第一步先实现双路召回：`strategy="hybrid"` 同时拿到 `bm25_hits` 和 `vector_hits`，trace 记录 `{"bm25": n, "vector": n}`。
+- 第二步再实现 RRF 纯函数 `fuse_hits_by_rrf()`，先不接数据库、不接模型 API。
+- 第三步把 RRF 接入 normal 和 parent-child retrieval pipeline。
 
 ### 日期：2026-04-30
 
@@ -1328,11 +1404,16 @@
 - 新增 `tests/test_parent_child_indexing_script.py`，验证脚本能将指定 parsed 文档索引为 parent-child chunk，并把 embedding 写入 child。
 - 使用真实模型完成父子 chunk 端到端验证：`uploaded -> parsed -> indexed`，目标文档生成 8 个 parent chunk 和 30 个 child chunk，child 均写入 `Qwen/Qwen3-Embedding-8B / 1024` embedding。
 - 使用真实 `parent_child + vector` 检索验证：query embedding 命中 child，retrieval pipeline 回填 parent，返回 `context_chunk_type = parent` 和 `citation_chunk_type = child`。
+- 明确旧 SQL `LIKE` keyword retrieval 仅作为 legacy 验证链路保留，不再作为生产级 keyword 检索方案。
+- 引入 OpenSearch / Elasticsearch BM25 作为生产级 lexical retrieval 方向。
+- 新增 lexical retrieval 类型、OpenSearch index mapping、BM25 store 和 `LexicalRetriever` 抽象。
+- 将 `retrieve_context(strategy="bm25")` 接入 BM25 lexical retriever：normal 模式检索 normal chunk，parent-child 模式检索 child chunk 并回填 parent。
+- 使用 fake OpenSearch 和 fake lexical retriever 完成 BM25 store 与 retrieval pipeline 分层测试。
 
 待完成：
 
-- 已有旧 chunk 的 re-embedding 脚本：为历史 normal / child chunk 补写真实 1024 维 embedding。
 - retrieval pipeline 继续扩展：hybrid retrieval、RRF、rerank、query rewrite、context assembly 与 Retrieval API 的生产化整合。
+- 根据真实数据情况决定是否需要 re-embedding 脚本；如果当前库中旧 chunk 只是测试数据，优先清库重建而不是写历史迁移脚本。
 - child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
 - docx 图片抽取与登记。
 - PDF 解析。

@@ -8,19 +8,18 @@ from uuid import UUID
 from app.models.document_chunk import DocumentChunk
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.rag.retrieval_types import (
-    ChunkHit,
+from app.models.retrieval_types import (
     ContextCandidate,
     RetrievalSource,
     RetrievalMode,
     RetrievalStrategy,
     RetrievalTrace,
-    RetrievalResult
+    RetrievalResult,
+    ChunkHit
 )
 from app.rag.embeddings import EmbeddingProvider
 from app.rag.vector_store import search_chunks_by_vector
-from app.rag.retrieval_types import ChunkHit
-
+from app.rag.lexical_retriever import LexicalRetriever
 
 
 def get_parent_for_child(
@@ -231,6 +230,9 @@ def retrieve_context_candidates(
     query: str,
     document_ids: list[UUID] | None = None,
     mode: RetrievalMode = "parent_child",
+    strategy: RetrievalStrategy = "bm25",
+    embedding_provider: EmbeddingProvider | None = None,
+    lexical_retriever: LexicalRetriever | None = None,
     top_k: int = 5,
 ) -> list[ContextCandidate]:
     """
@@ -242,6 +244,9 @@ def retrieve_context_candidates(
         query=query,
         document_ids=document_ids,
         mode=mode,
+        strategy=strategy,
+        embedding_provider=embedding_provider,
+        lexical_retriever=lexical_retriever,
         top_k=top_k,
     ).candidates
 
@@ -301,8 +306,9 @@ def retrieve_context(
     query: str,
     document_ids: list[UUID] | None = None,
     mode: RetrievalMode = "parent_child",
-    strategy: RetrievalStrategy = "keyword",
+    strategy: RetrievalStrategy = "bm25",
     embedding_provider: EmbeddingProvider | None = None,
+    lexical_retriever: LexicalRetriever | None = None,
     top_k: int = 5,
 ) -> RetrievalResult:
     """
@@ -328,15 +334,18 @@ def retrieve_context(
     if mode not in ("normal", "parent_child"):
         raise ValueError("Invalid retrieval mode")
 
-    if strategy not in ("keyword", "vector"):
+    if strategy not in ("bm25", "vector", "hybrid"):
         raise ValueError("Invalid retrieval strategy")
+
+    if strategy == "bm25" and lexical_retriever is None:
+        raise ValueError("lexical_retriever is required for bm25 retrieval")
 
     if strategy == "vector" and embedding_provider is None:
         raise ValueError("embedding_provider is required for vector retrieval")
 
     if mode == "normal":
-        if strategy == "keyword":
-            hits = search_chunks_by_keyword(
+        if strategy == "bm25":
+            hits = lexical_retriever.search(
                 db=db,
                 query=normalized_query,
                 chunk_type="normal",
@@ -367,8 +376,8 @@ def retrieve_context(
             ),
         )
 
-    if strategy == "keyword":
-        child_hits = search_chunks_by_keyword(
+    if strategy == "bm25":
+        child_hits = lexical_retriever.search(
             db=db,
             query=normalized_query,
             chunk_type="child",

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Literal
-from app.rag.retrieval_types import ContextCandidate, RetrievalMode
+from app.models.retrieval_types import ContextCandidate, RetrievalMode
 
 TaskType = Literal["qa", "summarize", "analysis", "code", "extract"]
 

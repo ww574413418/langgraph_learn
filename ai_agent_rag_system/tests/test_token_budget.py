@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from app.models.document_chunk import DocumentChunk
-from app.rag.retrieval_types import ContextCandidate
+from app.models.retrieval_types import ContextCandidate
 from app.services.context_assembly_service import assemble_context_with_dynamic_budget
 from app.rag.token_budget import (
     TokenBudgetRequest,

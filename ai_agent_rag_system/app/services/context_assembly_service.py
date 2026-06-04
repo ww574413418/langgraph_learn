@@ -18,7 +18,7 @@ Context assembly service.
 
 from dataclasses import dataclass
 from uuid import UUID
-from app.rag.retrieval_types import ContextCandidate
+from app.models.retrieval_types import ContextCandidate
 from app.rag.tokenizers import TokenCounter
 from app.rag.token_budget import (
     TaskType,

@@ -16,7 +16,7 @@ RetrievalSource = Literal[
 ]
 
 RetrievalMode = Literal["normal", "parent_child"]
-RetrievalStrategy = Literal["keyword", "vector"]
+RetrievalStrategy = Literal["bm25", "vector", "hybrid"]
 
 
 @dataclass
