@@ -673,3 +673,321 @@ def test_retrieve_context_bm25_strategy_requires_lexical_retriever() -> None:
 
     finally:
         db.close()
+
+
+def test_retrieve_context_hybrid_requires_lexical_retriever_and_embedding_provider() -> None:
+    """
+    hybrid 同时依赖 lexical retriever 和 embedding provider。
+
+    - 少 lexical_retriever：BM25 路召回无法执行。
+    - 少 embedding_provider：vector 路召回无法执行。
+
+    这里不需要准备测试文档，因为依赖校验发生在真正查询数据库之前。
+    """
+    db = create_test_session()
+    provider = DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
+    retriever = FakeLexicalRetriever(hits=[])
+
+    try:
+        try:
+            retrieve_context(
+                db=db,
+                query="机器人",
+                mode="normal",
+                strategy="hybrid",
+                lexical_retriever=None,
+                embedding_provider=provider,
+            )
+        except ValueError as exc:
+            assert "lexical_retriever is required" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for missing lexical_retriever")
+
+        try:
+            retrieve_context(
+                db=db,
+                query="机器人",
+                mode="normal",
+                strategy="hybrid",
+                lexical_retriever=retriever,
+                embedding_provider=None,
+            )
+        except ValueError as exc:
+            assert "embedding_provider is required" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for missing embedding_provider")
+
+    finally:
+        db.close()
+
+
+def test_retrieve_context_hybrid_collects_bm25_and_vector_hits() -> None:
+    """
+    验证 hybrid 的第一步：双路召回 candidate pool。
+
+    这个测试暂时不测：
+    - RRF 融合
+    - 最终排序
+    - 去重
+    - rerank
+
+    它只验证：
+    - strategy="hybrid" 时会调用 BM25 retriever
+    - 同时会调用 vector retriever
+    - trace 能分别记录 bm25 / vector 命中数
+    - candidate 里能看到两种 retrieval_source
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+    provider = DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
+
+    try:
+        bm25_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="BM25 lexical retrieval can match exact terms.",
+            chunk_index=0,
+        )
+
+        vector_text = "机器人无法充电时，需要检查充电底座和电源。"
+        vector_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content=vector_text,
+            chunk_index=1,
+            embedding_model=provider.model_name,
+            embedding=provider.embed_query(vector_text),
+            embedding_dimensions=provider.dimensions,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=bm25_chunk,
+                    score=12.5,
+                    raw_score=12.5,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
+        result = retrieve_context(
+            db=db,
+            query=vector_text,
+            document_ids=[document.id],
+            mode="normal",
+            strategy="hybrid",
+            lexical_retriever=retriever,
+            embedding_provider=provider,
+            top_k=5,
+        )
+
+        assert retriever.calls[0]["chunk_type"] == "normal"
+
+        assert result.trace.sources == ["bm25", "vector"]
+        assert result.trace.source_hit_counts == {
+            "bm25": 1,
+            "vector": 1,
+        }
+        assert result.trace.total_hits == 2
+
+        sources = {candidate.retrieval_source for candidate in result.candidates}
+        assert sources == {"hybrid"}
+
+        source_rank_groups = [
+            candidate.extra_metadata["source_ranks"]
+            for candidate in result.candidates
+        ]
+
+        assert {"bm25": 1} in source_rank_groups
+        assert {"vector": 1} in source_rank_groups
+
+        chunk_ids = {candidate.citation_chunk.id for candidate in result.candidates}
+        assert bm25_chunk.id in chunk_ids
+        assert vector_chunk.id in chunk_ids
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_hybrid_normal_uses_rrf_fusion() -> None:
+    """
+    验证 normal + hybrid 会使用 RRF 融合 BM25 和 vector 结果。
+
+    这个测试的重点不是 vector 检索本身，而是：
+    - 同一个 chunk 同时被 BM25 和 vector 召回
+    - 最终只保留一个 candidate
+    - candidate.retrieval_source 变成 hybrid
+    - candidate.extra_metadata 里保留原始来源排名
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+    provider = DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
+
+    try:
+        shared_text = "机器人无法充电时，需要检查充电底座和电源。"
+
+        shared_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content=shared_text,
+            chunk_index=0,
+            embedding_model=provider.model_name,
+            embedding=provider.embed_query(shared_text),
+            embedding_dimensions=provider.dimensions,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=shared_chunk,
+                    score=12.5,
+                    raw_score=12.5,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
+        result = retrieve_context(
+            db=db,
+            query=shared_text,
+            document_ids=[document.id],
+            mode="normal",
+            strategy="hybrid",
+            lexical_retriever=retriever,
+            embedding_provider=provider,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 1
+
+        candidate = result.candidates[0]
+
+        assert candidate.context_chunk.id == shared_chunk.id
+        assert candidate.citation_chunk.id == shared_chunk.id
+        assert candidate.retrieval_mode == "normal"
+        assert candidate.retrieval_source == "hybrid"
+        assert candidate.rank == 1
+        assert candidate.score is not None
+
+        assert candidate.extra_metadata["source_ranks"] == {
+            "bm25": 1,
+            "vector": 1,
+        }
+
+        assert result.trace.sources == ["bm25", "vector"]
+        assert result.trace.source_hit_counts == {
+            "bm25": 1,
+            "vector": 1,
+        }
+        assert result.trace.total_hits == 2
+        assert result.trace.used_hits == 1
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_parent_child_hybrid_uses_rrf_then_backfills_parent() -> None:
+    """
+    验证 parent_child + hybrid 的正确顺序：
+
+    1. BM25 检索 child
+    2. vector 检索 child
+    3. RRF 融合 child hits
+    4. 再把融合后的 child 回填 parent
+
+    注意：
+    不要先回填 parent 再 RRF。
+    因为 BM25 / vector 的召回排名发生在 child 粒度，
+    parent 只是最终上下文窗口。
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+    provider = DeterministicEmbeddingProvider(dimensions=settings.embedding_dimensions)
+
+    try:
+        parent = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="parent",
+            content="机器人充电故障排查完整说明：检查电源、底座、金属触点和摆放位置。",
+            chunk_index=0,
+        )
+
+        child_text = "机器人无法充电时，需要检查充电底座和电源。"
+
+        child = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content=child_text,
+            chunk_index=1,
+            parent_id=parent.id,
+            embedding_model=provider.model_name,
+            embedding=provider.embed_query(child_text),
+            embedding_dimensions=provider.dimensions,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=child,
+                    score=10.0,
+                    raw_score=10.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                )
+            ]
+        )
+
+        result = retrieve_context(
+            db=db,
+            query=child_text,
+            document_ids=[document.id],
+            mode="parent_child",
+            strategy="hybrid",
+            lexical_retriever=retriever,
+            embedding_provider=provider,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 1
+
+        candidate = result.candidates[0]
+
+        assert candidate.retrieval_mode == "parent_child"
+        assert candidate.retrieval_source == "hybrid"
+        assert candidate.rank == 1
+        assert candidate.score is not None
+
+        # parent-child 的核心语义：
+        # context 用 parent，citation 用 child。
+        assert candidate.context_chunk.id == parent.id
+        assert candidate.citation_chunk.id == child.id
+
+        # hybrid 的核心语义：
+        # 原始来源被保留在 metadata，而最终 source 是 hybrid。
+        assert candidate.extra_metadata["source_ranks"] == {
+            "bm25": 1,
+            "vector": 1,
+        }
+
+        assert result.trace.sources == ["bm25", "vector"]
+        assert result.trace.source_hit_counts == {
+            "bm25": 1,
+            "vector": 1,
+        }
+        assert result.trace.total_hits == 2
+        assert result.trace.used_hits == 1
+        assert result.trace.dropped_hit_counts == {}
+
+        assert retriever.calls[0]["chunk_type"] == "child"
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()

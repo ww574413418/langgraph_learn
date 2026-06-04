@@ -1409,10 +1409,14 @@
 - 新增 lexical retrieval 类型、OpenSearch index mapping、BM25 store 和 `LexicalRetriever` 抽象。
 - 将 `retrieve_context(strategy="bm25")` 接入 BM25 lexical retriever：normal 模式检索 normal chunk，parent-child 模式检索 child chunk 并回填 parent。
 - 使用 fake OpenSearch 和 fake lexical retriever 完成 BM25 store 与 retrieval pipeline 分层测试。
+- 完成 `normal + strategy="hybrid"` 第一阶段：同时收集 BM25 hits 和 vector hits，在 trace 中记录 `{"bm25": n, "vector": n}`；当前暂不做 RRF、去重或 rerank，只验证双路召回 candidate pool 稳定。
+- 实现 RRF 纯函数 `fuse_hits_by_rrf()`：按各召回源 rank 计算融合分数，统一输出 `retrieval_source="hybrid"`，并在 `extra_metadata.source_ranks/source_scores` 中保留原始来源信息。
+- 将 RRF 接入 `normal + hybrid`：BM25 normal hits 和 vector normal hits 先融合去重，再转成 normal `ContextCandidate`。
+- 将 RRF 接入 `parent_child + hybrid`：BM25 child hits 和 vector child hits 先在 child 粒度融合，再复用现有 parent backfill 逻辑生成 parent-child `ContextCandidate`。
 
 待完成：
 
-- retrieval pipeline 继续扩展：hybrid retrieval、RRF、rerank、query rewrite、context assembly 与 Retrieval API 的生产化整合。
+- retrieval pipeline 继续扩展：rerank、query rewrite、context assembly 与 Retrieval API 的生产化整合。
 - 根据真实数据情况决定是否需要 re-embedding 脚本；如果当前库中旧 chunk 只是测试数据，优先清库重建而不是写历史迁移脚本。
 - child chunk 质量控制：避免代码块边界、极短片段等低质量 child 进入最终候选。
 - docx 图片抽取与登记。

@@ -4,6 +4,7 @@
 负责把 ChunkHit 转成统一的 ContextCandidate，
 并处理父子 chunk 的 parent 回填。
 '''
+from dataclasses import dataclass
 from uuid import UUID
 from app.models.document_chunk import DocumentChunk
 from sqlalchemy import select
@@ -20,6 +21,24 @@ from app.models.retrieval_types import (
 from app.rag.embeddings import EmbeddingProvider
 from app.rag.vector_store import search_chunks_by_vector
 from app.rag.lexical_retriever import LexicalRetriever
+from app.rag.retrieval_fusion import fuse_hits_by_rrf
+
+
+@dataclass
+class CollectedHits:
+    """
+    表示一次底层召回完成后的 hit pool 和 trace 统计。
+
+    为什么需要这个小结构：
+    - retrieve_context() 不应该关心 bm25/vector/hybrid 各自怎样查。
+    - retrieve_context() 只需要知道：最终用于后续 pipeline 的 hits 是什么，
+      以及 trace 里应该记录哪些来源、每个来源命中多少、原始总命中多少。
+    - hybrid 的 total_hits 应该统计融合前的原始命中数，而不是 RRF 去重后的数量。
+    """
+    hits: list[ChunkHit]
+    sources: list[RetrievalSource]
+    source_hit_counts: dict[str, int]
+    total_hits: int
 
 
 def get_parent_for_child(
@@ -69,6 +88,7 @@ def build_parent_child_context_candidate(
     child: DocumentChunk,
     score: float | None,
     retrieval_source: RetrievalSource,
+    extra_metadata: dict | None = None
 ) -> ContextCandidate:
     return ContextCandidate(
         context_chunk=parent,
@@ -76,12 +96,14 @@ def build_parent_child_context_candidate(
         score=score,
         retrieval_mode="parent_child",
         retrieval_source=retrieval_source,
+        extra_metadata=extra_metadata or {},
     )
 
 def build_normal_context_candidate(
     chunk: DocumentChunk,
     score: float | None,
     retrieval_source: RetrievalSource,
+    extra_metadata: dict | None = None,
 ) -> ContextCandidate:
     return ContextCandidate(
         context_chunk=chunk,
@@ -89,6 +111,7 @@ def build_normal_context_candidate(
         score=score,
         retrieval_mode="normal",
         retrieval_source=retrieval_source,
+        extra_metadata=extra_metadata or {},
     )
 
 def normalize_normal_chunk_hits(
@@ -108,6 +131,7 @@ def normalize_normal_chunk_hits(
                 chunk=chunk,
                 score=hit.score,
                 retrieval_source=hit.retrieval_source,
+                extra_metadata=hit.extra_metadata,
             )
         )
 
@@ -284,6 +308,7 @@ def retrieve_parent_contexts_best_effort(
             child=child,
             score=child_hit.score,
             retrieval_source=child_hit.retrieval_source,
+            extra_metadata=child_hit.extra_metadata,
         )
 
         if existing is None:
@@ -300,6 +325,181 @@ def retrieve_parent_contexts_best_effort(
     )
 
     return results[:max_parent_contexts], orphan_children
+
+
+def _collect_normal_hits(
+    db: Session,
+    *,
+    query: str,
+    strategy: RetrievalStrategy,
+    document_ids: list[UUID] | None,
+    top_k: int,
+    embedding_provider: EmbeddingProvider | None,
+    lexical_retriever: LexicalRetriever | None,
+) -> CollectedHits:
+    """
+    收集 normal mode 的 ChunkHit。
+
+    normal mode 的召回单元就是 normal chunk：
+    - bm25：检索 normal chunk。
+    - vector：检索 normal chunk。
+    - hybrid：BM25 和 vector 都检索 normal chunk，再用 RRF 在 normal chunk 粒度融合。
+
+    注意：
+    这个函数只负责“拿到 hit pool + 统计 trace 所需信息”，
+    不负责把 hit 转成 ContextCandidate，也不负责 token budget / context assembly。
+    """
+    if strategy == "bm25":
+        hits = lexical_retriever.search(
+            db=db,
+            query=query,
+            chunk_type="normal",
+            document_ids=document_ids,
+            top_k=top_k,
+        )
+
+        return CollectedHits(
+            hits=hits,
+            sources=["bm25"],
+            source_hit_counts={"bm25": len(hits)},
+            total_hits=len(hits),
+        )
+
+    if strategy == "vector":
+        hits = search_normal_chunks_by_vector(
+            db=db,
+            query=query,
+            embedding_provider=embedding_provider,
+            document_ids=document_ids,
+            top_k=top_k,
+        )
+
+        return CollectedHits(
+            hits=hits,
+            sources=["vector"],
+            source_hit_counts={"vector": len(hits)},
+            total_hits=len(hits),
+        )
+
+    bm25_hits = lexical_retriever.search(
+        db=db,
+        query=query,
+        chunk_type="normal",
+        document_ids=document_ids,
+        top_k=top_k,
+    )
+
+    vector_hits = search_normal_chunks_by_vector(
+        db=db,
+        query=query,
+        embedding_provider=embedding_provider,
+        document_ids=document_ids,
+        top_k=top_k,
+    )
+
+    fused_hits = fuse_hits_by_rrf(
+        hit_groups={
+            "bm25": bm25_hits,
+            "vector": vector_hits,
+        },
+        top_k=top_k,
+    )
+
+    return CollectedHits(
+        hits=fused_hits,
+        sources=["bm25", "vector"],
+        source_hit_counts={
+            "bm25": len(bm25_hits),
+            "vector": len(vector_hits),
+        },
+        total_hits=len(bm25_hits) + len(vector_hits),
+    )
+
+
+def _collect_child_hits(
+    db: Session,
+    *,
+    query: str,
+    strategy: RetrievalStrategy,
+    document_ids: list[UUID] | None,
+    top_k: int,
+    embedding_provider: EmbeddingProvider | None,
+    lexical_retriever: LexicalRetriever | None,
+) -> CollectedHits:
+    """
+    收集 parent_child mode 的 child hits。
+
+    parent-child RAG 的关键点：
+    - 召回单元是 child chunk，因为 child 更短、更聚焦，适合匹配 query。
+    - 上下文单元是 parent chunk，因为 parent 更完整，适合放进 prompt。
+    - 所以 hybrid/RRF 必须先在 child 粒度完成，再进入 parent backfill。
+    """
+    if strategy == "bm25":
+        hits = lexical_retriever.search(
+            db=db,
+            query=query,
+            chunk_type="child",
+            document_ids=document_ids,
+            top_k=top_k,
+        )
+
+        return CollectedHits(
+            hits=hits,
+            sources=["bm25"],
+            source_hit_counts={"bm25": len(hits)},
+            total_hits=len(hits),
+        )
+
+    if strategy == "vector":
+        hits = search_child_chunks_by_vector(
+            db=db,
+            query=query,
+            embedding_provider=embedding_provider,
+            document_ids=document_ids,
+            top_k=top_k,
+        )
+
+        return CollectedHits(
+            hits=hits,
+            sources=["vector"],
+            source_hit_counts={"vector": len(hits)},
+            total_hits=len(hits),
+        )
+
+    bm25_hits = lexical_retriever.search(
+        db=db,
+        query=query,
+        chunk_type="child",
+        document_ids=document_ids,
+        top_k=top_k,
+    )
+
+    vector_hits = search_child_chunks_by_vector(
+        db=db,
+        query=query,
+        embedding_provider=embedding_provider,
+        document_ids=document_ids,
+        top_k=top_k,
+    )
+
+    fused_hits = fuse_hits_by_rrf(
+        hit_groups={
+            "bm25": bm25_hits,
+            "vector": vector_hits,
+        },
+        top_k=top_k,
+    )
+
+    return CollectedHits(
+        hits=fused_hits,
+        sources=["bm25", "vector"],
+        source_hit_counts={
+            "bm25": len(bm25_hits),
+            "vector": len(vector_hits),
+        },
+        total_hits=len(bm25_hits) + len(vector_hits),
+    )
+
 
 def retrieve_context(
     db: Session,
@@ -337,65 +537,55 @@ def retrieve_context(
     if strategy not in ("bm25", "vector", "hybrid"):
         raise ValueError("Invalid retrieval strategy")
 
-    if strategy == "bm25" and lexical_retriever is None:
-        raise ValueError("lexical_retriever is required for bm25 retrieval")
+    if strategy in ("bm25", "hybrid") and lexical_retriever is None:
+        raise ValueError("lexical_retriever is required for bm25 or hybrid retrieval")
 
-    if strategy == "vector" and embedding_provider is None:
-        raise ValueError("embedding_provider is required for vector retrieval")
+    if strategy in ("vector", "hybrid") and embedding_provider is None:
+        raise ValueError("embedding_provider is required for vector or hybrid retrieval")
 
     if mode == "normal":
-        if strategy == "bm25":
-            hits = lexical_retriever.search(
-                db=db,
-                query=normalized_query,
-                chunk_type="normal",
-                document_ids=document_ids,
-                top_k=top_k,
-            )
-        else:
-            hits = search_normal_chunks_by_vector(
-                db=db,
-                query=normalized_query,
-                embedding_provider=embedding_provider,
-                document_ids=document_ids,
-                top_k=top_k,
-            )
+        collected = _collect_normal_hits(
+            db=db,
+            query=normalized_query,
+            strategy=strategy,
+            document_ids=document_ids,
+            top_k=top_k,
+            embedding_provider=embedding_provider,
+            lexical_retriever=lexical_retriever,
+        )
 
-        candidates = normalize_normal_chunk_hits(hits=hits, max_contexts=top_k)
+        candidates = normalize_normal_chunk_hits(
+            hits=collected.hits,
+            max_contexts=top_k,
+        )
         candidates = _stable_sort_and_rank(candidates)
+
         return RetrievalResult(
             candidates=candidates,
             trace=RetrievalTrace(
                 query=query,
                 mode=mode,
-                sources=[strategy],
-                total_hits=len(hits),
+                sources=collected.sources,
+                total_hits=collected.total_hits,
                 used_hits=len(candidates),
-                source_hit_counts={strategy: len(hits)},
+                source_hit_counts=collected.source_hit_counts,
                 dropped_hit_counts={},
             ),
         )
 
-    if strategy == "bm25":
-        child_hits = lexical_retriever.search(
-            db=db,
-            query=normalized_query,
-            chunk_type="child",
-            document_ids=document_ids,
-            top_k=top_k,
-        )
-    else:
-        child_hits = search_child_chunks_by_vector(
-            db=db,
-            query=normalized_query,
-            embedding_provider=embedding_provider,
-            document_ids=document_ids,
-            top_k=top_k,
-        )
+    collected = _collect_child_hits(
+        db=db,
+        query=normalized_query,
+        strategy=strategy,
+        document_ids=document_ids,
+        top_k=top_k,
+        embedding_provider=embedding_provider,
+        lexical_retriever=lexical_retriever,
+    )
 
     candidates, orphan_children = retrieve_parent_contexts_best_effort(
         db=db,
-        child_hits=child_hits,
+        child_hits=collected.hits,
         max_parent_contexts=top_k,
     )
 
@@ -410,14 +600,10 @@ def retrieve_context(
         trace=RetrievalTrace(
             query=query,
             mode=mode,
-            # 不要写死 keyword。
-            # parent_child 分支现在也支持 keyword / vector 两种 strategy。
-            sources=[strategy],
-            total_hits=len(child_hits),
+            sources=collected.sources,
+            total_hits=collected.total_hits,
             used_hits=len(candidates),
-            # trace 必须记录真实检索来源。
-            # 否则前端/日志/评估都会误以为这次走的是 keyword。
-            source_hit_counts={strategy: len(child_hits)},
+            source_hit_counts=collected.source_hit_counts,
             dropped_hit_counts=dropped,
         ),
     )
