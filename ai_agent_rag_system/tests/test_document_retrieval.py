@@ -10,7 +10,7 @@ from app.services.document_retrieval_service import (
     search_chunks_by_keyword,
 )
 from app.rag.embeddings import DeterministicEmbeddingProvider
-
+from app.rag.rerankers import FakeReranker, SiliconFlowReranker
 
 
 def test_calculate_keyword_score_returns_zero_for_empty_query() -> None:
@@ -987,6 +987,363 @@ def test_retrieve_context_parent_child_hybrid_uses_rrf_then_backfills_parent() -
         assert result.trace.dropped_hit_counts == {}
 
         assert retriever.calls[0]["chunk_type"] == "child"
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+def test_retrieve_context_normal_mode_applies_reranker_when_provided() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        low_retrieval_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="召回分数高，但 rerank 认为不够相关。",
+            chunk_index=0,
+        )
+        high_rerank_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="召回分数低，但 rerank 认为最相关。",
+            chunk_index=1,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=low_retrieval_chunk,
+                    score=10.0,
+                    raw_score=10.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                ),
+                ChunkHit(
+                    chunk=high_rerank_chunk,
+                    score=2.0,
+                    raw_score=2.0,
+                    rank=2,
+                    retrieval_source="bm25",
+                ),
+            ]
+        )
+
+        reranker = FakeReranker(
+            scores_by_item_id={
+                str(low_retrieval_chunk.id): 0.1,
+                str(high_rerank_chunk.id): 0.9,
+            }
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="机器人充电问题",
+            document_ids=[document.id],
+            mode="normal",
+            strategy="bm25",
+            lexical_retriever=retriever,
+            reranker=reranker,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 2
+
+        assert result.candidates[0].citation_chunk.id == high_rerank_chunk.id
+        assert result.candidates[0].score == 0.9
+        assert result.candidates[0].rank == 1
+        assert result.candidates[0].retrieval_source == "rerank"
+
+        assert result.candidates[0].extra_metadata["before_rerank"]["score"] == 2.0
+        assert result.candidates[0].extra_metadata["before_rerank"]["rank"] == 2
+        assert result.candidates[0].extra_metadata["before_rerank"]["retrieval_source"] == "bm25"
+
+        assert result.trace.sources == ["bm25", "rerank"]
+        assert result.trace.used_hits == 2
+        assert result.trace.extra_metadata["reranker"] == "fake-reranker"
+
+        assert reranker.calls[0]["query"] == "机器人充电问题"
+        assert reranker.calls[0]["item_count"] == 2
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+
+def test_retrieve_context_parent_child_mode_reranks_by_child_but_returns_parent_context() -> None:
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        parent_a = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="parent",
+            content="parent A 完整上下文。",
+            chunk_index=0,
+        )
+        child_a = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content="child A 召回分数高，但 rerank 分数低。",
+            chunk_index=1,
+            parent_id=parent_a.id,
+        )
+
+        parent_b = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="parent",
+            content="parent B 完整上下文。",
+            chunk_index=2,
+        )
+        child_b = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="child",
+            content="child B 召回分数低，但 rerank 分数高。",
+            chunk_index=3,
+            parent_id=parent_b.id,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=child_a,
+                    score=9.0,
+                    raw_score=9.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                ),
+                ChunkHit(
+                    chunk=child_b,
+                    score=3.0,
+                    raw_score=3.0,
+                    rank=2,
+                    retrieval_source="bm25",
+                ),
+            ]
+        )
+
+        reranker = FakeReranker(
+            scores_by_item_id={
+                str(child_a.id): 0.2,
+                str(child_b.id): 0.95,
+            }
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="机器人故障排查",
+            document_ids=[document.id],
+            mode="parent_child",
+            strategy="bm25",
+            lexical_retriever=retriever,
+            reranker=reranker,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 2
+
+        first = result.candidates[0]
+
+        # rerank 排序依据是 child_b。
+        assert first.citation_chunk.id == child_b.id
+
+        # 但最终上下文仍然返回 parent_b。
+        assert first.context_chunk.id == parent_b.id
+
+        assert first.score == 0.95
+        assert first.rank == 1
+        assert first.retrieval_source == "rerank"
+
+        assert first.extra_metadata["before_rerank"]["score"] == 3.0
+        assert first.extra_metadata["before_rerank"]["rank"] == 2
+        assert first.extra_metadata["before_rerank"]["retrieval_source"] == "bm25"
+
+        assert result.trace.sources == ["bm25", "rerank"]
+        assert result.trace.extra_metadata["reranker"] == "fake-reranker"
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+
+def test_retrieve_context_normal_mode_with_real_siliconflow_reranker_adapter() -> None:
+    """
+    验证真实 SiliconFlowReranker 能接入 retrieval pipeline。
+
+    这个测试会真实请求 SiliconFlow /v1/rerank。
+
+    测试重点：
+    - retrieval pipeline 能把 candidates 转成 SiliconFlow documents。
+    - SiliconFlow 返回的 index 能映射回 citation_chunk.id。
+    - rerank 后 candidate 顺序、score、rank 被更新。
+    - trace.sources 记录 rerank。
+    - metadata 保留 provider 信息和 rerank 前状态。
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        apple_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="apple",
+            chunk_index=0,
+        )
+        banana_chunk = create_chunk(
+            db,
+            document_id=document.id,
+            chunk_type="normal",
+            content="banana",
+            chunk_index=1,
+        )
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=banana_chunk,
+                    score=10.0,
+                    raw_score=10.0,
+                    rank=1,
+                    retrieval_source="bm25",
+                ),
+                ChunkHit(
+                    chunk=apple_chunk,
+                    score=1.0,
+                    raw_score=1.0,
+                    rank=2,
+                    retrieval_source="bm25",
+                ),
+            ]
+        )
+
+        reranker = SiliconFlowReranker(
+            api_key=settings.reranker_api_key,
+            base_url=settings.reranker_base_url,
+            model=settings.reranker_model,
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="Apple",
+            document_ids=[document.id],
+            mode="normal",
+            strategy="bm25",
+            lexical_retriever=retriever,
+            reranker=reranker,
+            top_k=5,
+        )
+
+        assert len(result.candidates) == 2
+
+        first = result.candidates[0]
+
+        assert first.citation_chunk.id == apple_chunk.id
+        assert first.context_chunk.id == apple_chunk.id
+        assert first.score is not None
+        assert first.score > result.candidates[1].score
+        assert first.rank == 1
+        assert first.retrieval_source == "rerank"
+
+        assert first.extra_metadata["before_rerank"]["score"] == 1.0
+        assert first.extra_metadata["before_rerank"]["rank"] == 2
+        assert first.extra_metadata["before_rerank"]["retrieval_source"] == "bm25"
+        assert first.extra_metadata["rerank"]["metadata"]["provider"] == "siliconflow"
+        assert first.extra_metadata["rerank"]["metadata"]["provider_id"] is not None
+
+        assert result.trace.sources == ["bm25", "rerank"]
+        assert result.trace.extra_metadata["reranker"] == "siliconflow-reranker"
+        assert result.trace.extra_metadata["rerank_input_count"] == 2
+        assert result.trace.extra_metadata["rerank_output_count"] == 2
+
+    finally:
+        cleanup_test_document(db, document)
+        db.close()
+
+
+def test_retrieve_context_separates_retrieval_rerank_and_context_top_k() -> None:
+    """
+    验证候选池参数可以分层控制：
+
+    - retrieval_top_k: 底层 retriever 拿多少候选。
+    - rerank_top_k: rerank 后保留多少候选。
+    - context_top_k: 最终返回给 context assembly 多少候选。
+
+    这个测试故意让原始召回顺序和 rerank 顺序相反，
+    以确认最终结果来自 rerank 后再截断，而不是召回阶段过早截断。
+    """
+    db = create_test_session()
+    document = create_test_document(db)
+
+    try:
+        chunks = [
+            create_chunk(
+                db,
+                document_id=document.id,
+                chunk_type="normal",
+                content=f"candidate {index}",
+                chunk_index=index,
+            )
+            for index in range(4)
+        ]
+
+        retriever = FakeLexicalRetriever(
+            hits=[
+                ChunkHit(
+                    chunk=chunk,
+                    score=float(10 - index),
+                    raw_score=float(10 - index),
+                    rank=index + 1,
+                    retrieval_source="bm25",
+                )
+                for index, chunk in enumerate(chunks)
+            ]
+        )
+
+        reranker = FakeReranker(
+            scores_by_item_id={
+                str(chunks[0].id): 0.1,
+                str(chunks[1].id): 0.2,
+                str(chunks[2].id): 0.8,
+                str(chunks[3].id): 0.9,
+            }
+        )
+
+        result = retrieve_context(
+            db=db,
+            query="candidate",
+            document_ids=[document.id],
+            mode="normal",
+            strategy="bm25",
+            lexical_retriever=retriever,
+            reranker=reranker,
+            top_k=2,
+            retrieval_top_k=4,
+            rerank_top_k=3,
+            context_top_k=2,
+        )
+
+        assert retriever.calls[0]["top_k"] == 4
+        assert reranker.calls[0]["item_count"] == 4
+        assert reranker.calls[0]["top_k"] == 3
+
+        assert [item.citation_chunk.id for item in result.candidates] == [
+            chunks[3].id,
+            chunks[2].id,
+        ]
+        assert [item.rank for item in result.candidates] == [1, 2]
+        assert result.trace.used_hits == 2
+        assert result.trace.extra_metadata["retrieval_top_k"] == 4
+        assert result.trace.extra_metadata["rerank_top_k"] == 3
+        assert result.trace.extra_metadata["context_top_k"] == 2
+        assert result.trace.extra_metadata["rerank_input_count"] == 4
+        assert result.trace.extra_metadata["rerank_output_count"] == 3
 
     finally:
         cleanup_test_document(db, document)

@@ -52,6 +52,22 @@ class Settings(BaseSettings):
     # 不同平台限制不同，建议通过配置控制。
     embedding_batch_size: int = 64
 
+    # ===== Reranker 配置 =====
+    # 当前用于 SiliconFlow /v1/rerank。
+    # 注意：rerank 是检索后的重排，不是 embedding，也不是 chat model。
+    reranker_api_key: str | None = None
+    reranker_base_url: str = "https://api.siliconflow.cn"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_timeout_seconds: float = 30.0
+
+    # OpenSearch / lexical retrieval 配置
+    opensearch_url: str = "http://localhost:9200"
+    opensearch_username: str | None = None
+    opensearch_password: str | None = None
+    opensearch_chunks_index: str = "rag-chunks"
+    opensearch_timeout_seconds: float = 30.0
+
+
 # 缓存配置对象，避免每次导入都重新读取 .env。
 @lru_cache
 def get_settings() -> Settings:

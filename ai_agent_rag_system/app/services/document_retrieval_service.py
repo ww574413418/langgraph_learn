@@ -22,6 +22,13 @@ from app.rag.embeddings import EmbeddingProvider
 from app.rag.vector_store import search_chunks_by_vector
 from app.rag.lexical_retriever import LexicalRetriever
 from app.rag.retrieval_fusion import fuse_hits_by_rrf
+from app.rag.rerankers import (
+    BaseReranker,
+    apply_rerank_results_to_candidates,
+    build_rerank_items_from_candidates,
+    FakeReranker
+)
+from app.schemas.retrieval import RetrievalRequest
 
 
 @dataclass
@@ -247,6 +254,57 @@ def _stable_sort_and_rank(candidates: list[ContextCandidate]) -> list[ContextCan
 
     return sorted_items
 
+def _apply_optional_rerank(
+    *,
+    query: str,
+    candidates: list[ContextCandidate],
+    sources: list[RetrievalSource],
+    trace_extra_metadata: dict,
+    reranker: BaseReranker | None,
+    top_k: int,
+) -> tuple[list[ContextCandidate], list[RetrievalSource], dict]:
+    """
+    如果调用方传入 reranker，就对 candidates 做 rerank。
+
+    为什么单独抽 helper：
+    - normal 和 parent_child 都要用。
+    - 避免在两个分支里复制同一段逻辑。
+    - 保持 retrieve_context() 的主流程清晰。
+
+    返回：
+    - rerank 后的 candidates
+    - 更新后的 trace sources
+    - 更新后的 trace extra_metadata
+    """
+    if reranker is None:
+        return candidates, sources, trace_extra_metadata
+
+    rerank_items = build_rerank_items_from_candidates(candidates)
+
+    rerank_results = reranker.rerank(
+        query=query,
+        items=rerank_items,
+        top_k=top_k,
+    )
+
+    reranked_candidates = apply_rerank_results_to_candidates(
+        candidates=candidates,
+        rerank_results=rerank_results,
+    )
+
+    updated_sources: list[RetrievalSource] = [
+        *sources,
+        "rerank",
+    ]
+
+    updated_trace_extra_metadata = {
+        **trace_extra_metadata,
+        "reranker": reranker.name,
+        "rerank_input_count": len(rerank_items),
+        "rerank_output_count": len(reranked_candidates),
+    }
+
+    return reranked_candidates, updated_sources, updated_trace_extra_metadata
 
 #  retrieval pipeline 的统一入口
 def retrieve_context_candidates(
@@ -257,7 +315,11 @@ def retrieve_context_candidates(
     strategy: RetrievalStrategy = "bm25",
     embedding_provider: EmbeddingProvider | None = None,
     lexical_retriever: LexicalRetriever | None = None,
+    reranker: BaseReranker | None = None,
     top_k: int = 5,
+    retrieval_top_k: int | None = None,
+    rerank_top_k: int | None = None,
+    context_top_k: int | None = None,
 ) -> list[ContextCandidate]:
     """
     目的：保持现有调用方式不变（兼容层）。
@@ -271,7 +333,11 @@ def retrieve_context_candidates(
         strategy=strategy,
         embedding_provider=embedding_provider,
         lexical_retriever=lexical_retriever,
+        reranker=reranker,
         top_k=top_k,
+        retrieval_top_k=retrieval_top_k,
+        rerank_top_k=rerank_top_k,
+        context_top_k=context_top_k,
     ).candidates
 
 
@@ -509,7 +575,11 @@ def retrieve_context(
     strategy: RetrievalStrategy = "bm25",
     embedding_provider: EmbeddingProvider | None = None,
     lexical_retriever: LexicalRetriever | None = None,
+    reranker: BaseReranker | None = None,
     top_k: int = 5,
+    retrieval_top_k: int | None = None,
+    rerank_top_k: int | None = None,
+    context_top_k: int | None = None,
 ) -> RetrievalResult:
     """
     目的：
@@ -518,6 +588,15 @@ def retrieve_context(
     - 未来把 keyword 换成向量/FTS/hybrid 时，上层 API 不用改
     """
     top_k = _clamp_top_k(top_k)
+    effective_retrieval_top_k = _clamp_top_k(retrieval_top_k or top_k)
+    effective_context_top_k = _clamp_top_k(context_top_k or top_k)
+    effective_rerank_top_k = _clamp_top_k(rerank_top_k or effective_context_top_k)
+    top_k_metadata = {
+        "retrieval_top_k": effective_retrieval_top_k,
+        "rerank_top_k": effective_rerank_top_k,
+        "context_top_k": effective_context_top_k,
+    }
+
     normalized_query = query.strip()
     if not normalized_query:
         return RetrievalResult(
@@ -549,27 +628,38 @@ def retrieve_context(
             query=normalized_query,
             strategy=strategy,
             document_ids=document_ids,
-            top_k=top_k,
+            top_k=effective_retrieval_top_k,
             embedding_provider=embedding_provider,
             lexical_retriever=lexical_retriever,
         )
 
         candidates = normalize_normal_chunk_hits(
             hits=collected.hits,
-            max_contexts=top_k,
+            max_contexts=effective_retrieval_top_k,
         )
         candidates = _stable_sort_and_rank(candidates)
+
+        candidates, sources, trace_extra_metadata = _apply_optional_rerank(
+            query=normalized_query,
+            candidates=candidates,
+            sources=collected.sources,
+            trace_extra_metadata=top_k_metadata,
+            reranker=reranker,
+            top_k=effective_rerank_top_k,
+        )
+        candidates = candidates[:effective_context_top_k]
 
         return RetrievalResult(
             candidates=candidates,
             trace=RetrievalTrace(
                 query=query,
                 mode=mode,
-                sources=collected.sources,
+                sources=sources,
                 total_hits=collected.total_hits,
                 used_hits=len(candidates),
                 source_hit_counts=collected.source_hit_counts,
                 dropped_hit_counts={},
+                extra_metadata=trace_extra_metadata,
             ),
         )
 
@@ -578,7 +668,7 @@ def retrieve_context(
         query=normalized_query,
         strategy=strategy,
         document_ids=document_ids,
-        top_k=top_k,
+        top_k=effective_retrieval_top_k,
         embedding_provider=embedding_provider,
         lexical_retriever=lexical_retriever,
     )
@@ -586,7 +676,7 @@ def retrieve_context(
     candidates, orphan_children = retrieve_parent_contexts_best_effort(
         db=db,
         child_hits=collected.hits,
-        max_parent_contexts=top_k,
+        max_parent_contexts=effective_retrieval_top_k,
     )
 
     candidates = _stable_sort_and_rank(candidates)
@@ -595,16 +685,27 @@ def retrieve_context(
     if orphan_children:
         dropped["orphan_child"] = orphan_children
 
+    candidates, sources, trace_extra_metadata = _apply_optional_rerank(
+        query=normalized_query,
+        candidates=candidates,
+        sources=collected.sources,
+        trace_extra_metadata=top_k_metadata,
+        reranker=reranker,
+        top_k=effective_rerank_top_k,
+    )
+    candidates = candidates[:effective_context_top_k]
+
     return RetrievalResult(
         candidates=candidates,
         trace=RetrievalTrace(
             query=query,
             mode=mode,
-            sources=collected.sources,
+            sources=sources,
             total_hits=collected.total_hits,
             used_hits=len(candidates),
             source_hit_counts=collected.source_hit_counts,
             dropped_hit_counts=dropped,
+            extra_metadata=trace_extra_metadata,
         ),
     )
 

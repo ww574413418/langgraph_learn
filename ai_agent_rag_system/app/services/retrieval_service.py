@@ -1,7 +1,6 @@
 from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from app.models.document import Document
 from app.rag.tokenizers import TiktokenTokenCounter
 from app.schemas.retrieval import (
@@ -13,7 +12,12 @@ from app.schemas.retrieval import (
 )
 from app.services.context_assembly_service import assemble_context_with_dynamic_budget
 from app.services.document_retrieval_service import retrieve_context
-
+from app.core.config import settings
+from app.rag.rerankers import BaseReranker, FakeReranker, SiliconFlowReranker
+from app.rag.embeddings import EmbeddingProvider, create_embedding_provider
+from opensearchpy import OpenSearch
+from app.core.config import settings
+from app.rag.lexical_retriever import LexicalRetriever, OpenSearchBM25Retriever
 
 def resolve_retrieval_document_ids(
     db: Session,
@@ -97,12 +101,24 @@ def run_retrieval(
     '''
     document_ids = resolve_retrieval_document_ids(db=db, request=request)
 
+    embedding_provider = build_embedding_provider_for_request(request)
+    lexical_retriever = build_lexical_retriever_for_request(request)
+    reranker = build_reranker_for_request(request)
+
+
     retrieval_result = retrieve_context(
         db=db,
         query=request.query,
         document_ids=document_ids,
         mode=request.mode,
+        strategy=request.strategy,
+        embedding_provider=embedding_provider,
+        lexical_retriever=lexical_retriever,
+        reranker=reranker,
         top_k=request.top_k,
+        retrieval_top_k=request.retrieval_top_k,
+        rerank_top_k=request.rerank_top_k,
+        context_top_k=request.context_top_k,
     )
 
     token_counter = TiktokenTokenCounter()
@@ -123,4 +139,76 @@ def run_retrieval(
         assembled_context=assembled_context,
         budget_plan=budget_plan,
         trace=retrieval_result.trace,
+    )
+
+def build_reranker_for_request(
+    request: RetrievalRequest,
+) -> BaseReranker | None:
+    """
+    根据 API 请求构造 reranker。
+
+    这里属于 API service 层：
+    - 读取 request.rerank_mode
+    - 读取 settings
+    - 构造具体 provider adapter
+
+    底层 document_retrieval_service.py 仍然只接收 BaseReranker | None。
+    """
+    if request.rerank_mode == "none":
+        return None
+
+    if request.rerank_mode == "fake":
+        return FakeReranker(scores_by_item_id={})
+
+    if request.rerank_mode == "siliconflow":
+        return SiliconFlowReranker(
+            api_key=settings.reranker_api_key,
+            base_url=settings.reranker_base_url,
+            model=settings.reranker_model,
+            timeout_seconds=settings.reranker_timeout_seconds,
+        )
+
+    raise ValueError("Invalid rerank mode")
+
+def build_embedding_provider_for_request(
+    request: RetrievalRequest,
+) -> EmbeddingProvider | None:
+    """
+    vector / hybrid 需要 query embedding。
+    bm25 不需要 embedding provider。
+    """
+    if request.strategy not in ("vector", "hybrid"):
+        return None
+
+    return create_embedding_provider()
+
+
+def create_opensearch_client() -> OpenSearch:
+    http_auth = None
+
+    if settings.opensearch_username and settings.opensearch_password:
+        http_auth = (
+            settings.opensearch_username,
+            settings.opensearch_password,
+        )
+
+    return OpenSearch(
+        hosts=[settings.opensearch_url],
+        http_auth=http_auth,
+        timeout=settings.opensearch_timeout_seconds,
+    )
+
+def build_lexical_retriever_for_request(
+    request: RetrievalRequest,
+) -> LexicalRetriever | None:
+    """
+    bm25 / hybrid 需要 lexical retriever。
+    vector 不需要。
+    """
+    if request.strategy not in ("bm25", "hybrid"):
+        return None
+
+    return OpenSearchBM25Retriever(
+        client=create_opensearch_client(),
+        index_name=settings.opensearch_chunks_index,
     )

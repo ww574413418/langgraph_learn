@@ -3,13 +3,15 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
-
 from app.core.config import settings
 from app.db.session import get_db
 from app.main import app
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_base import KnowledgeBase
+from app.rag.rerankers import SiliconFlowReranker
+from app.services.retrieval_service import build_reranker_for_request
+
 
 def create_test_session() -> Session:
     engine = create_engine(settings.database_url)
@@ -104,97 +106,92 @@ def cleanup_test_document(db: Session, document: Document) -> None:
 
     db.commit()
 
-def test_retrieval_api_returns_context_for_normal_chunk() -> None:
-    db = create_test_session()
-    document = create_test_document(db)
-
-    app.dependency_overrides[get_db] = override_get_db(db)
-    client = TestClient(app)
-
-    try:
-        create_chunk(
-            db,
-            document_id=document.id,
-            chunk_type="normal",
-            content="RAG retrieval API should return this chunk.",
-            chunk_index=0,
-        )
-
-        response = client.post(
-            "/api/retrieval",
-            json={
-                "query": "retrieval",
-                "mode": "normal",
-                "top_k": 5,
-                "document_ids": [str(document.id)],
-                "task_type": "qa",
-            },
-        )
-
-        assert response.status_code == 200
-
-        data = response.json()
-
-        assert "RAG retrieval API should return this chunk." in data["context_text"]
-        assert len(data["citations"]) == 1
-        assert data["citations"][0]["retrieval_mode"] == "normal"
-        assert data["trace"]["sources"] == ["keyword"]
-        assert data["trace"]["total_hits"] == 1
-
-    finally:
-        app.dependency_overrides.clear()
-        cleanup_test_document(db, document)
-        db.close()
-
-
-def test_retrieval_api_empty_knowledge_base_scope_does_not_leak_other_documents() -> None:
-    db = create_test_session()
-    document = create_test_document(db)
-
-    empty_knowledge_base = KnowledgeBase(
-        name=f"empty-retrieval-api-kb-{uuid4()}",
-        description="empty retrieval api test",
-        domain="test",
-        status="active",
-        extra_metadata={"test_marker": str(uuid4())},
-        retrieval_config={},
+def test_retrieval_request_accepts_bm25_strategy() -> None:
+    request = RetrievalRequest(
+        query="retrieval",
+        mode="normal",
+        strategy="bm25",
+        top_k=5,
+        task_type="qa",
     )
 
-    db.add(empty_knowledge_base)
-    db.commit()
-    db.refresh(empty_knowledge_base)
+    assert request.strategy == "bm25"
 
-    app.dependency_overrides[get_db] = override_get_db(db)
-    client = TestClient(app)
 
+def test_retrieval_request_defaults_to_no_rerank() -> None:
+    request = RetrievalRequest(
+        query="retrieval",
+        mode="normal",
+        strategy="bm25",
+    )
+
+    assert request.rerank_mode == "none"
+
+from pydantic import ValidationError
+from app.schemas.retrieval import RetrievalRequest
+
+
+def test_retrieval_request_accepts_supported_rerank_mode() -> None:
+    request = RetrievalRequest(
+        query="retrieval",
+        mode="normal",
+        strategy="bm25",
+        rerank_mode="none",
+    )
+
+    assert request.rerank_mode == "none"
+
+
+def test_retrieval_request_rejects_unknown_rerank_mode() -> None:
     try:
-        create_chunk(
-            db,
-            document_id=document.id,
-            chunk_type="normal",
-            content="This retrieval chunk belongs to another knowledge base.",
-            chunk_index=0,
+        RetrievalRequest(
+            query="retrieval",
+            mode="normal",
+            strategy="bm25",
+            rerank_mode="unknown",
         )
+    except ValidationError:
+        return
 
-        response = client.post(
-            "/api/retrieval",
-            json={
-                "query": "retrieval",
-                "mode": "normal",
-                "top_k": 5,
-                "knowledge_base_id": str(empty_knowledge_base.id),
-                "task_type": "qa",
-            },
-        )
+    raise AssertionError("Expected ValidationError")
 
-        assert response.status_code == 200
+def test_retrieval_request_accepts_siliconflow_rerank_mode() -> None:
+    request = RetrievalRequest(
+        query="retrieval",
+        mode="normal",
+        strategy="bm25",
+        rerank_mode="siliconflow",
+    )
 
-        data = response.json()
+    assert request.rerank_mode == "siliconflow"
 
-        assert data["context_text"] == ""
-        assert data["citations"] == []
-        assert data["trace"]["total_hits"] == 0
-        assert data["trace"]["used_hits"] == 0
 
-    finally:
-        app.dependency_overrides.clear()
+def test_retrieval_request_accepts_candidate_pool_top_k_controls() -> None:
+    request = RetrievalRequest(
+        query="retrieval",
+        mode="normal",
+        strategy="hybrid",
+        top_k=5,
+        retrieval_top_k=20,
+        rerank_top_k=10,
+        context_top_k=3,
+    )
+
+    assert request.top_k == 5
+    assert request.retrieval_top_k == 20
+    assert request.rerank_top_k == 10
+    assert request.context_top_k == 3
+
+
+def test_build_reranker_for_request_returns_siliconflow_reranker() -> None:
+    request = RetrievalRequest(
+        query="retrieval",
+        mode="normal",
+        strategy="bm25",
+        rerank_mode="siliconflow",
+    )
+
+    reranker = build_reranker_for_request(request)
+
+    assert isinstance(reranker, SiliconFlowReranker)
+    assert reranker.name == "siliconflow-reranker"

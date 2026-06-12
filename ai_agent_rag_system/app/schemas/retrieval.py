@@ -3,16 +3,22 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 RetrievalMode = Literal["normal", "parent_child"]
-RetrievalStrategy = Literal["keyword", "vector"]
+RetrievalStrategy = Literal["bm25", "vector", "hybrid"]
+RerankMode = Literal["none", "fake", "siliconflow"]
+
+
 
 class RetrievalRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     mode: RetrievalMode = "parent_child"
     top_k: int = Field(default=5, ge=1, le=50)
-
+    retrieval_top_k: int | None = Field(default=None, ge=1, le=50)
+    rerank_top_k: int | None = Field(default=None, ge=1, le=50)
+    context_top_k: int | None = Field(default=None, ge=1, le=50)
+    strategy: RetrievalStrategy = "bm25"
     knowledge_base_id: UUID | None = None
     document_ids: list[UUID] | None = None
-
+    rerank_mode: RerankMode = "none"
     model_name: str | None = None
     model_context_window: int | None = Field(default=None, ge=1024, le=1_000_000)
 

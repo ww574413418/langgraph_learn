@@ -1,9 +1,7 @@
 # app/rag/vector_store.py
 from uuid import UUID
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from app.models.document_chunk import DocumentChunk
 from app.models.retrieval_types import ChunkHit
 
@@ -14,7 +12,7 @@ def cosine_distance_to_score(distance: float) -> float:
     但系统内部 ChunkHit.score 约定是“越大越好”。
 
     所以这里统一转换：
-    - distance 接近 0：score 接近 1
+    - distance 接近 0：score 接近 
     - distance 越大：score 越低
 
     注意：这不是唯一算法，但它让上层排序语义保持一致。

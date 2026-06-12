@@ -1413,6 +1413,38 @@
 - 实现 RRF 纯函数 `fuse_hits_by_rrf()`：按各召回源 rank 计算融合分数，统一输出 `retrieval_source="hybrid"`，并在 `extra_metadata.source_ranks/source_scores` 中保留原始来源信息。
 - 将 RRF 接入 `normal + hybrid`：BM25 normal hits 和 vector normal hits 先融合去重，再转成 normal `ContextCandidate`。
 - 将 RRF 接入 `parent_child + hybrid`：BM25 child hits 和 vector child hits 先在 child 粒度融合，再复用现有 parent backfill 逻辑生成 parent-child `ContextCandidate`。
+- 明确 rerank 接入位置：召回和 RRF 之后、token budget / context assembly 之前。
+- 明确 rerank 对象选择：统一对 `ContextCandidate.citation_chunk.content` 做 rerank；normal 模式下 citation chunk 就是 normal chunk，parent-child 模式下 citation chunk 是 child chunk。
+- 明确 parent-child rerank 语义：用 child chunk 判断相关性，最终仍返回 parent chunk 作为上下文，兼顾匹配精准度和上下文完整度。
+- 设计 rerank 基础抽象方向：`RerankItem` 表示待 rerank 文本，`RerankResult` 表示重排结果，`BaseReranker` 作为模型无关接口，`FakeReranker` 用于稳定测试。
+- 完成 rerank 适配层设计：通过 `build_rerank_items_from_candidates()` 将 `ContextCandidate` 转成 reranker 输入，通过 `apply_rerank_results_to_candidates()` 将 rerank 分数、排名和 trace metadata 应用回候选。
+- 明确适配层不能破坏 parent-child 关系：rerank 后 `context_chunk` 仍是 parent，`citation_chunk` 仍是命中的 child。
+- 将 reranker 可选接入 `retrieve_context()`：不传 reranker 时保持原召回排序；传入 reranker 时对 candidates 重新排序、更新 score/rank，并在 trace sources 中追加 `rerank`。
+- 修正 rerank trace 设计：helper 返回的 `sources` 必须写入 `RetrievalTrace.sources`，不能继续使用 rerank 前的 `collected.sources`。
+- 明确 Retrieval API 不再兼容旧 `keyword` 默认行为：API schema 开始显式暴露 `strategy`，当前策略方向为 `bm25` / `vector` / `hybrid`。
+- 删除旧的 API keyword 端到端测试，不再让测试固化废弃行为；空知识库范围不泄露属于 `resolve_retrieval_document_ids()` 的 service 逻辑，不应依赖 legacy keyword API 测试。
+- 为 Retrieval API 增加 `rerank_mode` 开关，当前支持 `none` / `fake`，用于先验证 API contract 和 pipeline 传参，不急于接真实 rerank 模型。
+- 修正 reranker 工厂函数的分层位置：`build_reranker_for_request()` 属于 `retrieval_service.py` 应用服务层，因为它依赖 `RetrievalRequest`；底层 `document_retrieval_service.py` 只接收 `BaseReranker | None`，不依赖 API schema。
+- 完成 rerank 相关测试修复，全量测试通过。
+- 明确真实 rerank 接入方向：SiliconFlow 提供的是专用 `/v1/rerank` endpoint，输入为 `query + documents + top_n`，输出为 `index + relevance_score`，不属于 Chat/Responses JSON rerank。
+- 因此真实实现不应命名为 `OpenAICompatibleLLMReranker`，更适合命名为 `SiliconFlowReranker` 或 provider-specific reranker adapter；底层仍统一实现 `BaseReranker`，retrieval pipeline 不关心具体供应商。
+- 明确 LangChain Runnable 边界：`SiliconFlowReranker` 暂不直接继承 Runnable，避免底层 retrieval pipeline 被 LangChain 类型耦合；后续如需接 chain，可增加薄 wrapper 或 `as_runnable()` 适配层。
+- 为 `SiliconFlowReranker` 补充单元测试：覆盖请求 payload 构造、`top_n` 截断、provider `index` 到 `item_id` 的映射、空 query 不调用 provider、非法 provider index 报错。
+- 将 SiliconFlow reranker 接入 Retrieval API 配置层：新增 reranker API key、base URL、model、timeout 等配置项，并扩展 `rerank_mode="siliconflow"`。
+- `build_reranker_for_request()` 已支持根据 API 请求构造 `SiliconFlowReranker`，测试层验证 schema 接受 `siliconflow` 且工厂函数返回正确 adapter。
+- 使用真实 SiliconFlow `/v1/rerank` 完成最小验证：`query="Apple"` 对 `apple / banana / fruit / vegetable` 重排，`apple` 得分最高，确认 API key、base URL、model、payload 和响应解析链路可用。
+- 排查真实调用问题：404 来自 base URL 拼接错误风险，401 来自 API key 无效或未正确读取；最终通过 `.env` 中的 `RERANKER_API_KEY` 修正并跑通。
+- 完成 Retrieval API 依赖工厂设计和接入：API service 层根据 `strategy` 构造 embedding provider、BM25 lexical retriever，并根据 `rerank_mode` 构造 reranker，再统一传入底层 `retrieve_context()`。
+- 明确 API 端到端链路边界：retrieval API 负责 query embedding、BM25/vector/hybrid 检索、RRF、rerank 和 context assembly；文档 chunk embedding 仍属于 indexing 链路，不在 retrieval API 中临时生成。
+- 启动并验证本地 OpenSearch 2.15：`curl http://localhost:9200` 返回集群信息。
+- 创建 `rag-chunks` lexical index，确认 mapping 包含 `content` BM25、CJK analyzer、chunk/document metadata 字段。
+- 将 PostgreSQL 中 indexed 文档的 chunks 同步到 OpenSearch，当前同步 169 条 chunk。
+- 通过 `OpenSearchBM25Retriever` 验证 BM25 lexical retrieval：query `机器人无法充电` 命中 5 条 child chunk，并返回 score/rank/chunk preview。
+- 完成 Retrieval API 端到端验证：`POST /api/retrieval` 使用 `mode=parent_child`、`strategy=hybrid`、`rerank_mode=siliconflow`，trace 返回 `sources=["bm25","vector","rerank"]`，BM25 和 vector 各命中 5 条，最终 3 条 parent-child context candidate 进入 context assembly。
+- 观察到当前检索质量仍有优化空间：CJK analyzer 下 BM25 命中偏维护/耗材类内容，rerank 分数整体较低；后续需要继续优化候选池大小、中文分词、child chunk 质量和 rerank 前的候选保留策略。
+- 实现候选池扩展参数设计：保留兼容字段 `top_k`，新增 `retrieval_top_k`、`rerank_top_k`、`context_top_k`，分别控制底层召回候选池、rerank 输出候选数和最终进入 context assembly 的候选数。
+- 更新 retrieval pipeline：底层 BM25/vector/hybrid 使用 `retrieval_top_k`，reranker 使用 `rerank_top_k`，最终 candidates 使用 `context_top_k` 截断，并在 trace extra metadata 中记录三个有效 top_k。
+- 更新 API schema 和 service 传参，让 `POST /api/retrieval` 可以显式传入候选池扩展参数；同步更新旧的 API 400 测试，避免继续固化“BM25 retriever 未配置”的过期契约。
 
 待完成：
 
